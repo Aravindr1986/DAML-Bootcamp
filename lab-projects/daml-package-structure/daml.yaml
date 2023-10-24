@@ -1,0 +1,13 @@
+sdk-version: 2.6.1
+name: wallet-superpackage-do-not-use
+source: src
+version: 0.0.1
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+  - daml-trigger
+sandbox-options:
+  - --wall-clock-time
+build-options:
+  - --include=src

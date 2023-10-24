@@ -1,0 +1,9 @@
+sdk-version: 2.6.1
+name: performant-daml-training
+version: 1.0.0
+source: daml
+start-navigator: false
+dependencies:
+- daml-prim
+- daml-stdlib
+- daml-script

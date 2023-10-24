@@ -1,0 +1,49 @@
+-- This should be its own package!
+
+module Exercise3.Solutions.Currency.Bonus.Swap where
+
+import Exercise3.Solutions.Currency.Bonus.Interfaces
+
+import DA.Assert
+
+-- This module is not really needed as part of the solution.
+-- It demonstrates how to also upgrade in such a way that
+-- "Cash" becomes "USD" and "Cash_V2 CHF" becomes merely "CHF".
+
+template AssetSwapProposal
+  with
+    requester : Party
+    receiver : Party
+    -- Triples of issuer, assetType, quantity
+    offerSpec : (Party, Text, Decimal)
+    offerCid : ContractId IAsset
+    requestedSpec : (Party, Text, Decimal)
+  where
+    signatory requester
+    observer receiver
+
+    choice Settle : ()
+      with
+        requestedCid : ContractId IAsset
+      controller receiver
+      do
+        actualOffer <- fetch offerCid
+        actualRequested <- fetch requestedCid
+        let
+          vo = view actualOffer
+          vr = view actualRequested
+
+        -- Check signatories. Needed for safety!
+        assertMsg "Offer Asset not signed by issuer!" (vo.issuer `elem` signatory actualOffer)
+        assertMsg "Requested Asset not signed by issuer!" (vr.issuer `elem` signatory actualRequested)
+
+        -- Check against spec
+        (vo.issuer, vo.assetType, vo.quantity) === offerSpec
+        (vr.issuer, vr.assetType, vr.quantity) === requestedSpec
+
+        -- Transfer
+        exercise offerCid Transfer with newOwner = receiver
+        exercise requestedCid Transfer with newOwner = requester
+        
+        return ()
+

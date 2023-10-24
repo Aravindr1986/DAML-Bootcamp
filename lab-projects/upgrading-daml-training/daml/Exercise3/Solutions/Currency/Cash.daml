@@ -1,0 +1,45 @@
+-- This should be its own package!
+
+module Exercise3.Solutions.Currency.Cash where
+
+import Exercise3.Solutions.Modularized.Interfaces
+
+template Cash
+  with
+    issuer : Party
+    owner : Party
+    quantity : Decimal
+    currency : Text
+    obs : [Party]
+  where
+    signatory [issuer, owner]
+    observer obs
+
+
+
+    -- Make new cash backwards compatible in case currency is USD.
+    interface instance IAsset for Cash where
+      view = VAsset with
+        assetType = if currency == "USD" then "Cash" else "V2_Cash " <> currency
+        ..
+      set_obs newObs = toInterface (this with obs = newObs)
+      set_owner newOwner = toInterface (this with owner = newOwner)
+      set_quantity newQuantity = toInterface (this with quantity = newQuantity)
+      transfer_for newOwner = toInterface $ CashTransferProposal with cash = this; ..
+
+
+
+template CashTransferProposal
+  with
+    newOwner : Party
+    cash : Cash
+  where
+    signatory (signatory cash)
+    observer newOwner
+    
+    -- Make new transfer proposals backwards compatible in case currency is USD.
+    interface instance IAssetTransferProposal for CashTransferProposal where
+      view = VAssetTransferProposal with
+        newOwner = newOwner
+        vasset = view (toInterface @IAsset cash)
+      asset = toInterface @IAsset cash

@@ -1,0 +1,120 @@
+module Asset where
+
+
+data AssetType = AssetType 
+    with
+        symbol: Text
+        issuer: Party
+        fungable: Bool
+    deriving (Eq,Show)
+
+template Asset
+    with 
+        assetType: AssetType
+        amount: Decimal 
+        owner: Party
+        observers:[Party] 
+    where
+        signatory owner,assetType.issuer
+        observer observers
+        ensure if assetType.fungable then amount>0.0 else amount==1.0
+
+       -- key (assetType,owner) :(AssetType,Party) --key has to have atleast one party
+       -- maintainer key._2
+       --create a new asset and archives the old one. It makes it visible to the recipent
+        choice CreateTransferProposal:ContractId TransferProposal 
+            with
+                receipent :Party
+            controller  owner
+            do
+                assetCid<-create this with
+                     observers=[receipent]
+                create TransferProposal with 
+                    originator=owner
+                    receipent
+                    assetCid
+                    issuer=assetType.issuer
+
+
+template Transfer
+     with
+        asset: Asset
+        receipent:Party
+    where 
+        signatory (signatory asset) --same authorization as the asset template  because it represents monetory value
+        observer receipent 
+
+        choice Transfer_Accept: ContractId Asset 
+            controller receipent
+            do
+                -- assetCid<-lookupByKey @Asset (asset.assetType,receipent) 
+                -- case assetCid of
+                --     Some cid ->do
+                --         receipentAsset <- fetch cid 
+                --         archive cid 
+                --         create receipentAsset with 
+                --             amount =receipentAsset.amount+asset.amount
+                --     None -> 
+                        create asset with --done because the earlier method leaked information to intermediary Bob
+                            owner =receipent --Similar to UTXO
+        
+        choice Transfer_Reject: ContractId Asset
+            controller receipent
+            do
+                -- assetCid<-lookupByKey @Asset $ key asset
+                -- case assetCid of
+                --     Some cid ->do
+                --         originatorAsset<-fetch cid 
+                --         archive cid 
+                --         create asset with 
+                --             amount =asset.amount+originatorAsset.amount
+                --     None-> 
+                        create asset 
+
+        choice Transfer_Cancel: ContractId Asset
+            controller asset.owner
+            do
+                -- assetCid<-lookupByKey @Asset $ key asset
+                -- case assetCid of
+                --     Some cid ->do
+                --         originatorAsset<-fetch cid 
+                --         archive cid 
+                --         create asset with 
+                --             amount =asset.amount+originatorAsset.amount
+                --     None-> 
+                        create asset 
+template TransferProposal --non escrow model
+    with
+        originator: Party
+        receipent:Party
+        issuer:Party
+        assetCid: ContractId Asset
+    where
+        signatory  originator
+        observer receipent
+
+        choice TransferProposal_Accept:ContractId Asset
+            controller  receipent,issuer
+            do
+                asset<-fetch assetCid
+                archive assetCid
+                create asset with 
+                    owner=receipent
+                    observers=[] 
+
+        choice TransferProposal_Reject:()--a chioce always retuns an update
+            controller  receipent
+            do
+                return()
+        
+        choice TransferProposal_Cancel:()
+            controller  originator
+            do
+                return()
+        
+
+
+    
+
+        
+                        

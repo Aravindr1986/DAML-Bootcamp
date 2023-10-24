@@ -1,0 +1,161 @@
+{-# LANGUAGE ApplicativeDo #-}
+
+module Final.Test where
+
+import Daml.Script
+
+import DA.Foldable (forA_)
+import DA.List (sortOn)
+
+import Final.XChange
+import Exercise3.Cash
+import Exercise3.Test
+
+-- Request_batch simulates one users' automation requesting a
+-- batch of swaps
+-- It expects a single input "from" currency and consumes all
+-- non-pending positions of that type for the user. So this
+-- likely runs sequentially, one batch at a time.
+-- It could be expanded to use rails like the settle_batch function.
+request_batch : Party -> UserId -> Party -> CurrencyId -> [(Decimal, CurrencyId)] -> Script ()
+request_batch op u p from tos = do
+  -- In async automation, query only non-pending positions not already
+  -- used in an open swap. The latter is detected here by obs being empty
+  positions <- queryFilter @Position p (\pos -> pos.owner == p && pos.currency == from.symbol && pos.obs == [])
+
+  submitUser u do
+    exerciseByKeyCmd @App op Create_Trades with
+      customer = p
+      swaps = [(from, map fst positions, tos)]
+
+  return ()
+
+-- settle_batch simulates Acme's automation settling a batch of
+
+settle_batch : UserId -> Party -> CurrencyId -> Int -> Int -> Script ()
+settle_batch u p c batchSize rails = do
+  -- In async automation, query only non-pending open swaps
+  trades <- queryFilter @Trade p (\trd -> trd.operator == p && trd.toCurrencyId == c)
+  -- Take the given number of qualifiying swaps
+  let trade_batch = take batchSize trades
+
+  -- In async automation, query only non-pending positions and keep track
+  -- of which positions represent the "rails"
+  positions <- queryFilter @Position p (\pos -> pos.owner == p && pos.currency == c.symbol)
+  -- For this moockup, assume the largest positions are the rails
+  -- and take the smallest rail and all other positions
+  let
+    sorted_positions = sortOn (\(_, pos) -> pos.quantity) positions
+    positions_to_use = take (length sorted_positions - 2) sorted_positions
+
+  submitUser u do
+    exerciseByKeyCmd @App p Settle_Trades with
+      toCids = map fst positions_to_use
+      tradeCids = map fst trade_batch
+  return ()
+
+test_xchange : Script ()
+test_xchange = do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+
+  -- helper variables
+  let
+    usd = CurrencyId pUsdBank "USD" 
+    chf = CurrencyId pChfBank "CHF" 
+
+  -- Acme provides prices with a small spread (1% each way)
+  submitUser uAcme do
+    createCmd Price with
+      provider = pAcme
+      obs = [pXChangeReader]
+      pair = CurrencyPair with
+        from = usd
+        to = chf
+      conversion = 0.99
+    createCmd Price with
+      provider = pAcme
+      obs = [pXChangeReader]
+      pair = CurrencyPair with
+        from = chf
+        to = usd
+      conversion = 0.99
+    return ()
+
+  -- Create the App contract
+  submitUser uAcme do
+    createCmd App with
+      operator = pAcme
+      obs = [pXChangeReader]
+
+  -- Some performance relevant parameters
+  let
+    -- Acme runs a number of "rails" per currency. The users
+    -- could do the same, but that's left as an exercise.
+    -- More rails means more parallelism, but requires more funds
+    operatorRails = 3
+    -- Acme runs settlement batches
+    -- Higher number means more throughput and higher latency
+    settlementBatchSize = 5
+    -- Alice and Bob run request batches
+    -- Higher number means more throughput and higher latency
+    requestBatchSize = 3
+
+  -- Set up the "rails"
+  forA_ ["USD", "CHF"] (\currency -> do
+    [(acmePositionCid, acmePosition)] <- queryFilter @Position pAcme (\pos -> pos.owner == pAcme && pos.currency == currency)
+    let splitQuantity = acmePosition.quantity / (intToDecimal operatorRails)
+    submitUser uAcme do
+      exerciseCmd acmePositionCid Split with
+        splitQuantities = replicate (operatorRails - 1) splitQuantity
+    )
+
+  -- The only contention left in the below is:
+  -- 1. For each pair (user, currency), the request_batch calls have to
+  --    be synchronized
+  -- 2. Users (and Acme) can still run out of funds
+  -- 3. Acme can run up to `operatorRails` calls to settle_batch in parallel.
+
+  request_batch pAcme uAlice pAlice usd (replicate requestBatchSize (1.0, chf))
+  request_batch pAcme uBob pBob usd (replicate requestBatchSize (1.0, chf))
+
+  request_batch pAcme uAlice pAlice chf (replicate requestBatchSize (1.0, usd))
+  request_batch pAcme uBob pBob chf (replicate requestBatchSize (1.0, usd))
+
+  request_batch pAcme uAlice pAlice usd (replicate requestBatchSize (1.0, chf))
+  request_batch pAcme uBob pBob usd (replicate requestBatchSize (1.0, chf))
+
+  request_batch pAcme uAlice pAlice chf (replicate requestBatchSize (1.0, usd))
+  request_batch pAcme uBob pBob chf (replicate requestBatchSize (1.0, usd))
+
+  settle_batch uAcme pAcme usd settlementBatchSize operatorRails
+  settle_batch uAcme pAcme usd settlementBatchSize operatorRails
+
+  settle_batch uAcme pAcme chf settlementBatchSize operatorRails
+  settle_batch uAcme pAcme chf settlementBatchSize operatorRails
+
+  request_batch pAcme uAlice pAlice usd (replicate requestBatchSize (1.0, chf))
+  request_batch pAcme uBob pBob usd (replicate requestBatchSize (1.0, chf))
+
+  request_batch pAcme uAlice pAlice chf (replicate requestBatchSize (1.0, usd))
+  request_batch pAcme uBob pBob chf (replicate requestBatchSize (1.0, usd))
+
+  settle_batch uAcme pAcme usd settlementBatchSize operatorRails
+  settle_batch uAcme pAcme chf settlementBatchSize operatorRails
+  settle_batch uAcme pAcme chf settlementBatchSize operatorRails
+
+  request_batch pAcme uAlice pAlice usd (replicate requestBatchSize (1.0, chf))
+  request_batch pAcme uBob pBob usd (replicate requestBatchSize (1.0, chf))
+
+  request_batch pAcme uAlice pAlice chf (replicate requestBatchSize (1.0, usd))
+  request_batch pAcme uBob pBob chf (replicate requestBatchSize (1.0, usd))
+
+  request_batch pAcme uAlice pAlice chf (replicate requestBatchSize (1.0, usd))
+  request_batch pAcme uBob pBob chf (replicate requestBatchSize (1.0, usd))
+
+  settle_batch uAcme pAcme usd settlementBatchSize operatorRails
+  settle_batch uAcme pAcme usd settlementBatchSize operatorRails
+  settle_batch uAcme pAcme usd settlementBatchSize operatorRails
+  settle_batch uAcme pAcme chf settlementBatchSize operatorRails
+  settle_batch uAcme pAcme chf settlementBatchSize operatorRails
+
+  return ()

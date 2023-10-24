@@ -1,0 +1,78 @@
+module Initial.Cash where
+
+import DA.Assert
+
+template Position
+  with
+    issuer : Party
+    owner : Party
+    quantity : Decimal
+    obs : [Party]
+  where
+    signatory [issuer, owner]
+    observer obs
+    ensure quantity > 0.0
+
+    choice Transfer : ContractId Position
+      with
+        newOwner : Party
+      controller [owner, newOwner]
+      do
+        create this with 
+          owner = newOwner
+          obs = []
+
+    choice Propose_Transfer : ContractId TransferProposal
+      with
+        newOwner : Party
+      controller owner
+      do
+        create TransferProposal with 
+          position = this
+          newOwner
+
+    choice Split : (ContractId  Position, [ContractId Position])
+      with
+        splitQuantities : [Decimal]
+      controller owner
+      do
+        remCid <- create this with quantity = this.quantity -  sum splitQuantities
+        splitCids <- forA splitQuantities (\splitQuantity -> create this with
+            quantity = splitQuantity
+          )
+        return (remCid, splitCids)
+
+    choice Merge : ContractId Position
+      with
+        otherCids : [ContractId Position]
+      controller owner
+      do
+        quantities <- forA otherCids (\otherCid -> do
+          other <- fetch otherCid
+          other === this with 
+            quantity = other.quantity
+            obs = other.obs
+          archive otherCid
+          return other.quantity)
+        create this with
+          quantity = quantity + sum quantities
+
+template TransferProposal
+  with
+    position : Position
+    newOwner : Party
+  where
+    signatory (signatory position)
+    observer newOwner::(observer position)
+
+    choice Accept : ContractId Position
+      controller newOwner
+      do
+        create position with
+          owner = newOwner
+          obs = []
+
+    choice Cancel : ContractId Position
+      controller position.owner
+      do
+        create position

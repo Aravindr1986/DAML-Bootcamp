@@ -1,0 +1,147 @@
+{-# LANGUAGE ApplicativeDo #-}
+
+module Exercise3.Test where
+
+import Daml.Script
+
+import DA.Action
+import DA.Foldable (forA_)
+
+import Exercise3.Cash
+import Exercise3.XChange
+
+data TestParties = TestParties with
+  pUsdBank : Party
+  pChfBank : Party
+  pAcme : Party
+  pXChangeReader : Party
+  pAlice : Party
+  pBob : Party
+
+data TestUsers = TestUsers with
+  uUsdBank : UserId
+  uChfBank : UserId
+  uAcme : UserId
+  uAlice : UserId
+  uBob : UserId
+
+init_parties : Script TestParties
+init_parties = do
+  let allocate t = allocatePartyWithHint t (PartyIdHint t)
+  pUsdBank <- allocate "UsdBank"
+  pChfBank <- allocate "ChfBank"
+  pAcme <- allocate "Acme"
+  pXChangeReader <- allocate "XChangeReader"
+  pAlice <- allocate "Alice"
+  pBob <- allocate "Bob"
+
+  return (TestParties with ..)
+
+init_users : TestParties -> Script TestUsers
+init_users TestParties{..} = do
+  let 
+    makeUser t p rs = do
+      uid <- validateUserId t
+      let 
+        u = User with 
+          userId = uid
+          primaryParty = Some p
+      createUser u (CanActAs p :: rs)
+      return uid
+  uUsdBank <- makeUser "usdank" pUsdBank []
+  uChfBank <- makeUser "chfbank" pChfBank []
+  uAcme <- makeUser "acme" pAcme []
+  uAlice <- makeUser "alice" pAlice [CanReadAs pXChangeReader]
+  uBob <- makeUser "bob" pBob [CanReadAs pXChangeReader]
+
+  return (TestUsers with ..)
+
+init_cash : Script (TestParties, TestUsers)
+init_cash = do
+  ps@TestParties{..} <- init_parties
+  us@TestUsers{..} <- init_users ps
+
+
+
+  -- Issue some cash in the form of transfer proposals.
+  let
+    issue issuer currency quantity owner = createCmd TransferProposal with
+      position = Position with obs = []; owner = issuer; ..
+      newOwner = owner 
+  submitUser uUsdBank do
+    issue pUsdBank "USD" 1000000.0 pAcme
+    issue pUsdBank "USD" 100.0 pAlice
+    issue pUsdBank "USD" 100.0 pBob
+    return ()
+  submitUser uChfBank do
+    issue pChfBank "CHF" 1000000.0 pAcme
+    issue pChfBank "CHF" 100.0 pAlice
+    issue pChfBank "CHF" 100.0 pBob
+    return ()
+
+  -- Accept all transfer proposals
+  let
+    accept_all p = do
+      proposals <- queryFilter @TransferProposal p (\tp -> tp.newOwner == p)
+      submit p do
+        forA_ proposals (\(cid, _) -> exerciseCmd cid Accept)
+  forA_ [pAcme, pAlice, pBob] accept_all
+
+  return (ps, us)
+
+init_prices : TestUsers -> TestParties -> Script ()
+init_prices TestUsers{..} TestParties{..} = do
+  -- Acme provides prices with a small spread (1% each way)
+  submitUser uAcme do
+    createCmd Price with
+      provider = pAcme
+      obs = [pXChangeReader]
+      pair = CurrencyPair with
+        issuerFrom = pUsdBank
+        currencyFrom = "USD"
+        issuerTo = pChfBank
+        currencyTo = "CHF"
+      conversion = 0.99
+    createCmd Price with
+      provider = pAcme
+      obs = [pXChangeReader]
+      pair = CurrencyPair with
+        issuerFrom = pChfBank
+        currencyFrom = "CHF"
+        issuerTo = pUsdBank
+        currencyTo = "USD"
+      conversion = 0.99
+    return ()
+
+xchange_lots : Script ()
+xchange_lots = do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+  init_prices tus tps
+
+  -- Create the App contract
+  submitUser uAcme do
+    createCmd App with
+      operator = pAcme
+      obs = [pXChangeReader]
+
+  -- Make Acme's positions readable by XChangeReader
+  acmeCash <- queryFilter @Position pAcme (\tp -> tp.owner == pAcme)
+  submitUser uAcme do
+    forA_ acmeCash (\(cid, _) -> exerciseCmd cid Set_Observer with newObs = [pXChangeReader])
+
+  -- Swap repeatedly from USD to CHF
+  replicateA_ 1 do --repeates the below steps
+    -- Get our hands on the positions to be moved
+    [(customerFromCid, _)] <- queryFilter @Position pAlice (\p -> p.owner == pAlice && p.currency == "USD")
+    [(customerToCid, _)] <- queryFilter @Position pAlice (\p -> p.owner == pAlice && p.currency == "CHF")
+    [(operatorFromCid, _)] <- queryFilter @Position pXChangeReader (\p -> p.owner == pAcme && p.currency == "USD")
+    [(operatorToCid, _)] <- queryFilter @Position pXChangeReader (\p -> p.owner == pAcme && p.currency == "CHF")
+    
+    -- Perform a swap
+    submitUser uAlice do
+      exerciseByKeyCmd @App pAcme Swap_V1 with 
+        customer = pAlice
+        fromQuantity = 11.0
+        ..
+
+

@@ -1,0 +1,108 @@
+module Exercise2.Cash where
+
+import DA.Assert
+
+template Position
+  with
+    issuer : Party
+    owner : Party
+    quantity : Decimal
+    obs : [Party]
+  where
+    signatory [issuer, owner]
+    observer obs
+    ensure quantity > 0.0
+
+template TransferProposal
+  with
+    position : Position
+    newOwner : Party
+  where
+    signatory (signatory position)
+    observer newOwner::(observer position)
+
+template CashRules
+  with
+    bank : Party
+    bankReader : Party
+  where
+    signatory bank
+    observer bankReader
+
+    nonconsuming choice Transfer : ContractId Position
+      with
+        owner : Party
+        newOwner : Party
+        cid : ContractId Position
+      controller [owner, newOwner]
+      do
+        pos <- fetch cid
+        pos.issuer === bank
+        pos.owner === owner
+        create pos with 
+          owner = newOwner
+          obs = []
+
+    nonconsuming choice Propose_Transfer : ContractId TransferProposal
+      with
+        owner : Party
+        newOwner : Party
+        cid : ContractId Position
+      controller owner
+      do
+        pos <- fetch cid
+        pos.issuer === bank
+        pos.owner === owner
+        create TransferProposal with 
+          position = pos
+          newOwner
+
+    nonconsuming choice Redistribute : (ContractId  Position, [ContractId Position])
+      with
+        owner : Party
+        cids : [ContractId Position]
+        splitQuantities : [Decimal]
+      controller owner
+      do
+        qs <- forA cids (\cid -> do
+          pos <- fetch cid
+          pos.issuer === bank
+          pos.owner === owner
+          archive cid
+          return pos.quantity
+          )
+        let
+          total = sum qs
+          issuer = bank
+          obs = []
+        remCid <- create Position with quantity = total -  sum splitQuantities; ..
+        splitCids <- forA splitQuantities (\splitQuantity -> create Position with
+            quantity = splitQuantity
+            ..
+          )
+        return (remCid, splitCids)
+    
+    nonconsuming choice Accept_TransferProposal : ContractId Position
+      with
+        newOwner : Party
+        tpCid : ContractId TransferProposal
+      controller newOwner
+      do
+        tp <- fetch tpCid
+        tp.position.issuer === bank
+        tp.newOwner === newOwner
+        create tp.position with
+          owner = newOwner
+          obs = []
+
+    nonconsuming choice Cancel : ContractId Position
+      with
+        owner : Party
+        tpCid : ContractId TransferProposal
+      controller owner
+      do
+        tp <- fetch tpCid
+        tp.position.issuer === bank
+        tp.position.owner === owner
+        create tp.position
+

@@ -1,0 +1,41 @@
+module Cash where
+import Interface
+
+template Cash
+  with
+    _issuer : Party
+    _owner : Party
+    _quantity : Decimal
+    _obs : [Party]
+  where
+    signatory [_issuer, _owner]
+    observer _obs
+
+    interface instance IAsset for Cash where
+      view = VAsset with
+        issuer = _issuer
+        owner = _owner
+        obs = _obs
+        quantity = _quantity
+        assetType = "Cash"
+      set_obs newObs = toInterface (this with _obs = newObs)
+      set_owner newOwner = toInterface (this with _owner = newOwner)
+      set_quantity newQuantity = toInterface (this with _quantity = newQuantity)
+      transfer_for newOwner = toInterface $ CashTransferProposal with cash = this; ..
+
+
+template CashTransferProposal
+  with
+    newOwner : Party
+    cash : Cash
+  where
+    signatory (signatory cash)
+    observer newOwner
+    
+    interface instance IAssetTransferProposal for CashTransferProposal where
+      view = VAssetTransferProposal with
+        newOwner = newOwner
+        vasset = view (toInterface @IAsset cash)
+      asset = toInterface @IAsset cash
+
+

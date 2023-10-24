@@ -1,0 +1,42 @@
+module Asset2 where --simplification of atomic swap
+
+
+data AssetType = AssetType 
+    with
+        symbol: Text
+        issuer: Party
+        fungable: Bool
+    deriving (Eq,Show)
+
+template Asset2
+    with 
+        assetType: AssetType
+        amount: Decimal 
+        owner: Party
+        observers:[Party] 
+    where
+        signatory owner,assetType.issuer
+        observer observers
+        ensure if assetType.fungable then amount>0.0 else amount==1.0
+
+        choice ChangeOwner:ContractId Asset2
+            with 
+                newOwner:Party
+            controller owner, newOwner
+            do
+                create this with 
+                    owner=newOwner
+                    observers=[]
+
+
+
+
+
+
+
+
+
+    
+
+        
+                        

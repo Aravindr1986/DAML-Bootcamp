@@ -1,0 +1,105 @@
+module Exercise3.Solutions.Bonds where
+
+import Exercise3.Solutions.Modularized.Interfaces
+import Exercise3.Solutions.Modularized.Swap
+import Exercise3.Solutions.Modularized.Cash
+import Exercise3.Solutions.Modularized.Scripts
+
+import Daml.Script
+import DA.Foldable (forA_)
+
+template Bond
+  with
+    issuer : Party
+    owner : Party
+    quantity : Decimal
+    obs : [Party]
+  where
+    signatory [issuer, owner]
+    observer obs
+
+    interface instance IAsset for Bond where
+      view = VAsset with
+        assetType = "Bond"
+        ..
+      set_obs newObs = toInterface (this with obs = newObs)
+      set_owner newOwner = toInterface (this with owner = newOwner)
+      set_quantity newQuantity = toInterface (this with quantity = newQuantity)
+      transfer_for newOwner = toInterface $ BondTransferProposal with bond = this; ..
+
+
+template BondTransferProposal
+  with
+    newOwner : Party
+    bond : Bond
+  where
+    signatory (signatory bond)
+    observer newOwner
+    
+    interface instance IAssetTransferProposal for BondTransferProposal where
+      view = VAssetTransferProposal with
+        newOwner = newOwner
+        vasset = view (toInterface @IAsset bond)
+      asset = toInterface @IAsset bond
+
+
+init_bonds : TestParties -> TestUsers -> Script ()
+init_bonds TestParties{..} TestUsers{..} = do
+    -- Issue some bonds in the form of transfer proposals.
+    let 
+      bond = Bond with
+        issuer = pBank
+        owner = pBank
+        obs = []
+        quantity = 1.0
+
+    -- 1 position of Bond for Alice
+    submitUser uBank do
+      createCmd BondTransferProposal with
+        bond
+        newOwner = pAlice 
+
+    -- 1 positions of Bond for Bob
+    submitUser uBank do
+      createCmd BondTransferProposal with
+        bond
+        newOwner = pBob
+
+    -- Accept all transfer proposals
+    let
+        accept_all p = do
+        proposals <- queryFilter @BondTransferProposal p (\tp -> tp.newOwner == p)
+        submit p do
+            forA_ proposals (\(cid, _) -> exerciseCmd (toInterfaceContractId @IAssetTransferProposal cid) Accept_TransferProposal)
+    forA_ [pAlice, pBob] accept_all
+
+
+test_bond : Script ()
+test_bond = script do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- test_swap
+
+  init_bonds tps tus
+
+  -- Swap cash for bond
+  -- Alice proposes a new swap, Cash for Bond
+  (cid, posa)::_ <- query @Cash pAlice
+  cid <- submitUser uAlice do
+    exerciseCmd (toInterfaceContractId @IAsset cid) Set_Observers with newObs = [pBob]
+  
+  let offerSpec = (pBank, "Cash", posa.quantity)
+      requestedSpec = (pBank, "Bond", posa.quantity)
+  swapCid <- submitUser uAlice do
+    createCmd AssetSwapProposal with
+      requester = pAlice
+      receiver = pBob
+      offerSpec
+      requestedSpec
+      offerCid = toInterfaceContractId @IAsset cid
+  
+  -- Bob accepts using a Bond.
+  (cid, _)::_ <- queryFilter @Bond pBob (\posb -> posb.owner == pBob && posb.quantity == posa.quantity)
+  submitUser uBob do
+    exerciseCmd swapCid Settle with requestedCid = toInterfaceContractId @IAsset cid
+
+
+  return ()

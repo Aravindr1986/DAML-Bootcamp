@@ -1,0 +1,133 @@
+module Final.XChange where
+
+import DA.Action
+import DA.Assert
+import DA.List (head, tail)
+import DA.Foldable (forA_)
+
+import Exercise3.Cash
+
+data CurrencyId = CurrencyId with
+  issuer : Party
+  symbol : Text
+    deriving (Eq, Show, Ord)
+
+data CurrencyPair = CurrencyPair with
+  from : CurrencyId
+  to : CurrencyId
+    deriving (Eq, Show)
+
+template Price
+  with
+    provider : Party
+    obs : [Party]
+    pair : CurrencyPair
+    conversion : Decimal
+  where
+    signatory provider
+    observer obs
+
+    key (provider, pair) : (Party, CurrencyPair)
+    maintainer key._1
+
+template App
+  with
+    operator : Party
+    obs : [Party]
+  where
+
+    signatory operator
+    observer obs
+
+    key operator : Party
+    maintainer key
+
+    nonconsuming choice Create_Trades : ()
+      with
+        customer : Party
+        -- First CurrencyId is the currency from which to convert
+        -- List of positions are the input funds
+        -- The list of pairs are the quantities to convert and target currencies
+        swaps : [(CurrencyId, [ContractId Position], [(Decimal, CurrencyId)])]
+      controller customer
+      do
+        forA_ swaps (\(fromCurrencyId, fromPositionCids, targets) -> do
+          -- Merge funds into a single position.
+          fromPositionCid <- case fromPositionCids of
+            [x] -> return x
+            [] -> error "No funds supplied"
+            x::otherCids -> exercise x Merge with otherCids
+
+          foldlA (\positionCid (fromQuantity, toCurrencyId) -> do
+            
+            let 
+              pair = CurrencyPair with
+                from = fromCurrencyId
+                to = toCurrencyId
+              
+            (_, price) <- fetchByKey @Price (operator, pair)
+
+            -- Split out the right amount from the customer
+            -- Make the operator an observer on the split out balance
+            (positionCid', [fromCid]) <- exercise positionCid Split with
+              splitQuantities = [fromQuantity]    
+            fromCid <- exercise fromCid Set_Observer with newObs = [operator]
+
+            -- Create a Trade
+            create Trade with
+              quantityTo = fromQuantity * price.conversion
+              ..
+
+              return positionCid'
+            )
+            fromPositionCid
+            targets
+
+          return ()
+          )
+
+    nonconsuming choice Settle_Trades : ()
+      with
+        toCids : [ContractId Position]
+        tradeCids : [ContractId Trade]
+      controller operator
+      do
+        toCid0 <- exercise (head toCids) Merge with otherCids = tail toCids
+        foldlA (\toCid tradeCid -> do
+          (_, toCid') <- exercise tradeCid Settle with toCid 
+          return toCid'
+          )
+          toCid0
+          tradeCids 
+        return ()
+
+template Trade
+  with
+    operator : Party
+    customer : Party
+    fromCid : ContractId Position
+    toCurrencyId : CurrencyId
+    quantityTo : Decimal
+  where
+    signatory [customer, operator]
+
+    choice Settle : (ContractId Position, ContractId Position)
+      with
+        toCid : ContractId Position
+      controller operator
+      do
+        -- Fetch contracts and validate they form a valid swap
+        to <- fetch toCid
+        to.owner === operator
+        to.currency === toCurrencyId.symbol
+        to.issuer === toCurrencyId.issuer
+
+        -- Transfer the customer's funds
+        fromCid' <- exercise fromCid Transfer with newOwner = operator
+
+        -- Split out the right amount from the operator
+        -- Transfer it
+        (toCid', [splitCid]) <- exercise toCid Split with splitQuantities = [quantityTo]
+        exercise splitCid Transfer with newOwner = customer
+
+        return (fromCid', toCid')

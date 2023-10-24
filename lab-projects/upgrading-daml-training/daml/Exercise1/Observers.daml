@@ -1,0 +1,55 @@
+module Exercise1.Observers where
+
+import Initial.Cash
+import Initial.Scripts
+
+import DA.Assert
+import DA.Foldable (forA_)
+import Daml.Script
+
+template AdditionalRules
+  with
+    bank : Party
+    bankReader : Party
+  where
+    signatory bank
+    observer bankReader
+
+    nonconsuming choice Set_Observers : ContractId Position
+      with
+        owner : Party
+        positionCid : ContractId Position
+        new_obs : [Party]
+      controller owner
+      do
+        position <- fetch positionCid
+        owner === position.owner
+        bank === position.issuer
+
+        archive positionCid
+        create position with obs = new_obs
+
+test_set_obs : Script ()
+test_set_obs = script do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+
+  -- Create a reader party and give access to Alice and Bob
+  pBankReader <- allocateParty "BankReader"
+  grantUserRights uAlice [CanReadAs pBankReader]
+  grantUserRights uBob [CanReadAs pBankReader]
+
+  -- Bank Issues the new rule
+  rules <- submitUser uBank do
+    createCmd AdditionalRules with
+      bank = pBank
+      bankReader = pBankReader
+
+  -- Alice can make Bob observer on all her positions
+  alicePositions <- query @Position pAlice
+  forA_ (alicePositions) (\(cid, _) -> do
+    submitUser uAlice do
+      exerciseCmd rules Set_Observers with 
+        owner = pAlice
+        positionCid = cid
+        new_obs = [pBob]
+    )

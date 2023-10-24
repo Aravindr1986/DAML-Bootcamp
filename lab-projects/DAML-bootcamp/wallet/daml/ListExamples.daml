@@ -1,0 +1,120 @@
+module ListExamples where
+
+import Daml.Script
+import DA.List
+
+import  DA.Map as Map
+
+data Person=Person with
+    name :Text
+    email:Text
+        deriving (Show,Eq,Ord)
+testPerson =script do
+    let
+        person1 =Person with
+            name="Alice"
+            email="abc@abc.com"
+        person2 =Person with
+            name="Bob"
+            email="Bob@abc.com"
+    debug person1
+    debug $person1== person2
+    debug $ person1<person2
+
+findBmi: Decimal ->Decimal->Text
+
+findBmi height weight   --gaurd notation used when we have more than two alternatives 
+    | weight/(height^2) <=18.5 ="Underwight"
+    | otherwise ="obese"
+
+
+findBmigaurdwithwhere: Decimal ->Decimal->Text
+findBmigaurdwithwhere height weight   --gaurd notation used when we have more than two alternatives 
+    | bmi <=18.5 ="Underwight"
+    | otherwise ="obese"
+    where bmi=weight/(height^2)
+   
+listTest: Script()
+listTest = script do
+    let 
+        intList =[1,2,3,4]
+        fruitList=["apples","oranges","bananan"]
+    debug $ "1. head:" <> show (head fruitList)
+    debug $ "2. tail:" <> show (tail fruitList)
+
+listToText : [Text] -> Text
+listToText xs = foldl(\acc xs-> acc<>xs) "" xs
+
+--tuples with greater than 5 are not reccommended
+listSeparator=script do
+    let 
+        song=[("do","a deer,a female deer"),("re"," a drop of golden"),("mi","a name "),("fa","a long way")]
+        songMap =Map.fromList song
+
+        keyList=keys songMap
+        valuList= values songMap
+
+    debug $show keyList
+    debug $ show valuList
+    debug $  listToText keyList
+    debug $ show (reverse keyList)
+    debug $ show $ reverse valuList -- $ chages the associtivity because $ has the lowest precedence.
+
+    return()
+
+isEmpty:[a]->Bool
+isEmpty x=
+    if length x==0 then True else False
+
+isEmptyCase:[a]->Bool
+isEmptyCase x= case x of
+    y :: ys -> False --implies list with atleast one or more elements. uses pattern matching(look into)
+    _ -> True
+testIsEmptyList=script do
+    debug $ isEmptyCase[]
+    debug $ isEmptyCase[8,4,5]
+
+    debug $ isEmpty[]
+    debug $ isEmpty[8]
+getLetterGradeUsingIf : Int->Text
+getLetterGradeUsingIf mrk= do
+    if(mrk>=90) then  "A"
+    else if(mrk>=80 && mrk<90) then "B"
+         else if (mrk>=70 && mrk<80) then "C" 
+              else "D"
+
+getLetterGradeUsingCase : Text->Text
+getLetterGradeUsingCase grade= case grade of
+    "A"->"mrk>=90"
+    "B"->"mrk>=80 && mrk<90"
+    "C"->"mrk>=70 && mrk<80"
+    "D"->"mrk<70"
+    _->"Error"
+
+
+getLetterGradeUsingGaurd : Int->Text
+getLetterGradeUsingGaurd mrk
+    |mrk>=90="A"
+    |mrk>=80 && mrk<90 = "B"
+    |mrk>=70 && mrk<80 ="C"
+    |mrk<70 ="D"
+    |otherwise ="Error"   
+
+getAverageGradeLetter : Decimal->Decimal->Text
+getAverageGradeLetter mrk1 mrk2
+    |mrk>=90.0 = "A"
+    |mrk>=80.0 && mrk<90.0 = "B"
+    |mrk>=70.0 && mrk<80.0 ="C"
+    |mrk<70.0 ="D"
+    |otherwise ="Error"  
+     where mrk=(mrk1+mrk2)/2.0
+
+testGrades =script do
+    debug $ getAverageGradeLetter 40.0 50.0
+    debug $ getAverageGradeLetter 90.0 90.0
+    debug $ getAverageGradeLetter 70.0 70.0
+    debug $ getLetterGradeUsingIf 90
+    debug $ getLetterGradeUsingGaurd 90
+    debug $ getLetterGradeUsingGaurd (-1)
+    debug $ getLetterGradeUsingCase "A"
+    debug $ getLetterGradeUsingCase "ABC"

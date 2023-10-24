@@ -1,0 +1,185 @@
+{-# LANGUAGE ApplicativeDo #-}
+
+module Exercise1.Currency where
+
+import Initial.Cash qualified as Old
+import Initial.Scripts
+
+import DA.Action
+import DA.Assert
+import DA.Foldable (forA_)
+import Daml.Script
+
+template Position
+  with
+    issuer : Party
+    owner : Party
+    quantity : Decimal
+    currency : Text
+    obs : [Party]
+  where
+    signatory [issuer, owner]
+    observer obs
+
+    choice Transfer : ContractId Position
+      with
+        newOwner : Party
+      controller [owner, newOwner]
+      do
+        create this with 
+          owner = newOwner
+          obs = []
+
+    choice Propose_Transfer : ContractId TransferProposal
+      with
+        newOwner : Party
+      controller owner
+      do
+        create TransferProposal with 
+          position = this
+          newOwner
+
+    choice Split : (ContractId  Position, [ContractId Position])
+      with
+        splitQuantities : [Decimal]
+      controller owner
+      do
+        remCid <- create this with quantity = this.quantity -  sum splitQuantities
+        splitCids <- forA splitQuantities (\splitQuantity -> create this with
+            quantity = splitQuantity
+          )
+        return (remCid, splitCids)
+
+    choice Merge : ContractId Position
+      with
+        otherCids : [ContractId Position]
+      controller owner
+      do
+        quantities <- forA otherCids (\otherCid -> do
+          other <- fetch otherCid
+          other === this with 
+            quantity = other.quantity
+            obs = other.obs
+          archive otherCid
+          return other.quantity)
+        create this with
+          quantity = quantity + sum quantities
+
+template TransferProposal
+  with
+    position : Position
+    newOwner : Party
+  where
+    signatory (signatory position)
+    observer newOwner::(observer position)
+
+    choice Accept : ContractId Position
+      controller newOwner
+      do
+        create position with
+          owner = newOwner
+          obs = []
+
+    choice Cancel : ContractId Position
+      controller position.owner
+      do
+        create position
+
+-- In a separate package:
+
+template UpgradeProposal
+  with
+    bank : Party
+    counterparty : Party
+  where
+    signatory bank
+    observer counterparty
+
+    choice Accept_Upgrade : ContractId Upgrader
+      controller counterparty
+      do
+        create Upgrader with ..
+
+-- As part of the upgrade we have to decide what to do with the
+-- extra decimal places.
+-- In this example, we collect them up and issue a new position,
+-- rounded to two decimals.
+-- Any additional left-over is left non-upgraded.
+template Upgrader
+  with
+      bank : Party
+      counterparty : Party
+    where
+      signatory bank, counterparty
+
+      nonconsuming choice Run_Upgrade : ()
+        with
+          positionCids : [ContractId Old.Position]
+          tpCids : [ContractId Old.TransferProposal]
+        controller bank
+        do
+          forA_ positionCids (\positionCid -> do
+            Old.Position{..} <- fetch positionCid
+            owner === counterparty
+            issuer === bank
+            archive positionCid
+            create Position with currency = "USD"; ..
+            )
+
+          forA_ tpCids (\tpCid -> do
+            Old.TransferProposal{position = Old.Position{..}; ..}  <- fetch tpCid
+            owner === counterparty
+            issuer === bank
+            archive tpCid
+            create TransferProposal with
+              position = Position with currency = "USD"; ..
+              ..
+            )
+
+
+
+while : (Action m) => m Bool -> m ()
+while run = do
+  continue <- run
+  when continue (while run)
+
+test_upgrade : Script ()
+test_upgrade = do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+
+  -- Bank proposes the upgrade
+  submitUser uBank do
+    createCmd UpgradeProposal with
+      bank = pBank
+      counterparty = pAlice
+    createCmd UpgradeProposal with
+      bank = pBank
+      counterparty = pBob
+    return ()
+
+  -- Alice and Bob accept
+  [(pa, _)] <- query @UpgradeProposal pAlice
+  submitUser uAlice do exerciseCmd pa Accept_Upgrade
+  [(pb, _)] <- query @UpgradeProposal pBob
+  submitUser uBob do exerciseCmd pb Accept_Upgrade
+
+  -- Run upgrade in batches of some reasonable size.
+  let batchSize = 10
+  upgraders <- query @Upgrader pBank
+  forA_ upgraders (\(upgraderCid, upgrader) -> do
+    while do
+      poss <- take batchSize <$> queryFilter @Old.Position pBank
+          (\pos -> pos.issuer == pBank && pos.owner == upgrader.counterparty)
+      tps <- take (batchSize - length poss) <$> queryFilter @Old.TransferProposal pBank
+          (\tp -> tp.position.issuer == pBank && tp.position.owner == upgrader.counterparty)
+           
+      if (length poss + length tps > 0)
+        then do
+          submitUser uBank do
+            exerciseCmd upgraderCid Run_Upgrade with
+              positionCids = map fst poss
+              tpCids = map fst tps
+          return True
+        else return False
+    return ()
+    )

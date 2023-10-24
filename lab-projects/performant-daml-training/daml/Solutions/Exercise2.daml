@@ -1,0 +1,47 @@
+{-# LANGUAGE ApplicativeDo #-}
+
+module Solutions.Exercise2 where
+
+import Daml.Script
+
+template App
+  with
+    acme : Party
+    alice : Party
+  where
+    signatory acme
+    observer alice
+
+    nonconsuming choice Business_Transaction : ()
+      with
+      controller alice
+      do
+        return ()
+
+
+-- Since the aim is to blow things up, test_app is guarded by taking a parameter.
+-- Run it using two terminals
+-- 1. `daml sandbox`
+-- 2. `daml deploy && daml script --dar .daml/dist/performant-daml-training-1.0.0.dar --ledger-host localhost --ledger-port 6865 --script-name "Solutions.Exercise2:test_app" --input-file unit.json`
+
+-- Uncomment the next line at your own risk to run the script in the IDE.
+-- run = test_app ()
+
+test_app : () -> Script ()
+test_app () = do
+  -- Parties assumed to be on distict participants
+  acme <- allocateParty "acme"
+  alice <- allocateParty "alice"
+
+  -- Acme initializes the app
+  fooCid <- submit acme do
+    createCmd App with ..
+
+  -- Alice performs the business transaction five times IN ONE TRANSACTION.
+  submit alice do
+    exerciseCmd fooCid Business_Transaction
+    exerciseCmd fooCid Business_Transaction
+    exerciseCmd fooCid Business_Transaction
+    exerciseCmd fooCid Business_Transaction
+    exerciseCmd fooCid Business_Transaction
+    return ()

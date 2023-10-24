@@ -1,0 +1,131 @@
+-- This should be its own package!
+
+module Exercise3.Solutions.Currency.Bonus.Interfaces where
+
+-- This module is not really needed as part of the solution.
+-- It demonstrates how to also upgrade in such a way that
+-- "Cash" becomes "USD" and "Cash_V2 CHF" becomes merely "CHF".
+
+import Exercise3.Solutions.Modularized.Cash qualified as V1
+import Exercise3.Solutions.Currency.Cash qualified as V2
+
+import DA.Assert
+
+data VAsset = VAsset with
+  issuer : Party
+  owner : Party
+  assetType : Text
+  quantity : Decimal
+  obs : [Party]
+    deriving (Eq, Show)
+
+data VAssetTransferProposal = VAssetTransferProposal with
+  vasset : VAsset
+  newOwner : Party
+    deriving (Eq, Show)
+
+
+interface IAssetTransferProposal where
+  viewtype VAssetTransferProposal
+  asset : IAsset
+  
+  choice Accept_TransferProposal : ContractId IAsset
+    controller (view this).newOwner
+    do
+      create $ set_owner (asset this) (view this).newOwner
+
+  choice Reject_TransferProposal : ContractId IAsset
+    controller (view this).newOwner
+    do
+      create $ asset this
+    
+  -- Implement the new interface for old transfer proposals.
+  interface instance IAssetTransferProposal for V1.CashTransferProposal where
+    view = VAssetTransferProposal with
+      newOwner = newOwner
+      vasset = view (toInterface @IAsset cash)
+    asset = toInterface @IAsset cash
+
+  -- Implement the new interface for new transfer proposals.
+  interface instance IAssetTransferProposal for V2.CashTransferProposal where
+    view = VAssetTransferProposal with
+      newOwner = newOwner
+      vasset = view (toInterface @IAsset cash)
+    asset = toInterface @IAsset cash
+      
+
+interface IAsset where
+  viewtype VAsset
+  set_owner : Party -> IAsset
+  set_obs : [Party] -> IAsset
+  set_quantity : Decimal -> IAsset
+  transfer_for : Party -> IAssetTransferProposal
+
+  choice Transfer : ContractId IAsset
+      with
+        newOwner : Party
+      controller [(view this).owner, newOwner]
+      do
+        create $ set_owner (set_obs this []) newOwner
+
+  choice Split : (ContractId  IAsset, [ContractId IAsset])
+    with
+      splitQuantities : [Decimal]
+    controller (view this).owner
+    do
+      remCid <- create $ set_quantity this ((view this).quantity -  sum splitQuantities)
+      splitCids <- forA splitQuantities (\splitQuantity -> create$ set_quantity this splitQuantity)
+      return (remCid, splitCids)
+
+  choice Merge : ContractId IAsset
+    with
+      otherCids : [ContractId IAsset]
+    controller (view this).owner
+    do
+      quantities <- forA otherCids (\otherCid -> do
+        other <- fetch otherCid
+        let vo = view other
+        vo === (view this) with 
+          quantity = vo.quantity
+          obs = vo.obs
+        exercise otherCid Archive_Asset
+        return vo.quantity)
+      create $ set_quantity this ((view this).quantity + sum quantities)
+
+  choice Propose_Transfer : ContractId IAssetTransferProposal
+    with
+      newOwner : Party
+    controller (view this).owner
+    do
+      create (transfer_for this newOwner)
+
+  choice Set_Observers : ContractId IAsset
+    with
+      newObs : [Party]
+    controller (view this).owner
+    do
+      create $ set_obs this newObs
+
+  choice Archive_Asset : ()
+    controller (signatory this)
+    do return ()
+
+  -- Implement the new interface for old cash, setting currency to USD.
+  interface instance IAsset for V1.Cash where
+    view = VAsset with
+      assetType = "USD"
+      ..
+    set_obs newObs = toInterface (this with obs = newObs)
+    set_owner newOwner = toInterface (this with owner = newOwner)
+    set_quantity newQuantity = toInterface (this with quantity = newQuantity)
+    transfer_for newOwner = toInterface $ V1.CashTransferProposal with cash = this; ..
+
+  -- Implement the new interface for new cash
+  interface instance IAsset for V2.Cash where
+    view = VAsset with
+      assetType = currency
+      ..
+    set_obs newObs = toInterface (this with obs = newObs)
+    set_owner newOwner = toInterface (this with owner = newOwner)
+    set_quantity newQuantity = toInterface (this with quantity = newQuantity)
+    transfer_for newOwner = toInterface $ V2.CashTransferProposal with cash = this; ..

@@ -1,0 +1,67 @@
+module Exercise3.Solutions.Currency.Bonus.Scripts where
+
+import Exercise3.Solutions.Currency.Cash qualified as V2.Cash
+import Exercise3.Solutions.Modularized.Cash qualified as V1.Cash
+import Exercise3.Solutions.Modularized.Scripts
+import Exercise3.Solutions.Currency.Scripts
+import Exercise3.Solutions.Currency.Bonus.Interfaces
+import Exercise3.Solutions.Currency.Bonus.Swap
+
+import Daml.Script
+
+test_bonus : Script ()
+test_bonus = script do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- test_upgrade
+
+  -- Optional extra to change the ugly "V2_Cash CHF" and "Cash" to "CHF" and "USD"
+
+  -- NEW SWAP, OLD ASSETS
+  -- Alice proposes a new swap, USD for USD, but allocates using an old asset.
+  (cid, posa)::_ <- query @V1.Cash.Cash pAlice
+  cid <- submitUser uAlice do
+    exerciseCmd (toInterfaceContractId @IAsset cid) Set_Observers with newObs = [pBob]
+  
+  let assetSpec = (pBank, "USD", posa.quantity)
+  swapCid <- submitUser uAlice do
+    createCmd AssetSwapProposal with
+      requester = pAlice
+      receiver = pBob
+      offerSpec = assetSpec
+      requestedSpec = assetSpec
+      offerCid = toInterfaceContractId @IAsset cid
+  
+  -- Bob accepts using an old asset.
+  (cid, _)::_ <- queryFilter @V1.Cash.Cash pBob (\posb -> posb.owner == pBob && posb.quantity == posa.quantity)
+  submitUser uBob do
+    exerciseCmd swapCid Settle with requestedCid = toInterfaceContractId @IAsset cid
+
+  -- NEW SWAP, MIX OF ASSETS, MIX OF CURRENCIES
+  -- Alice proposes a new swap, USD for CHF, but allocates using an old asset.
+  (cid, posa)::_ <- queryFilter @V1.Cash.Cash pAlice (\pos -> pos.owner == pAlice)
+  cid <- submitUser uAlice do
+    exerciseCmd (toInterfaceContractId @IAsset cid) Set_Observers with newObs = [pBob]
+  
+  let offerSpec = (pBank, "USD", posa.quantity)
+      requestedSpec = (pBank, "CHF", posa.quantity)
+  swapCid <- submitUser uAlice do
+    createCmd AssetSwapProposal with
+      requester = pAlice
+      receiver = pBob
+      offerSpec
+      requestedSpec
+      offerCid = toInterfaceContractId @IAsset cid
+  
+  -- Bob accepts using a new asset.
+  (cid, _)::_ <- queryFilter @V2.Cash.Cash pBob (\posb -> posb.owner == pBob && posb.quantity == posa.quantity  && posb.currency == "CHF")
+  submitUser uBob do
+    exerciseCmd swapCid Settle with requestedCid = toInterfaceContractId @IAsset cid
+
+  -- Bob can merge his old cash positions into the new cash.
+  [(new_cid, _)] <- queryFilter @V2.Cash.Cash pBob (\posb -> posb.owner == pBob && posb.currency == "USD")
+  old_cids <- map (toInterfaceContractId @IAsset . fst) <$> 
+    queryFilter @V1.Cash.Cash pBob (\posb -> posb.owner == pBob)
+  submitUser uBob do
+    exerciseCmd (toInterfaceContractId @IAsset new_cid) Merge with
+      otherCids = old_cids
+
+  return ()

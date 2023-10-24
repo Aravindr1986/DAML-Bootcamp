@@ -1,0 +1,349 @@
+module Account1 where --Daml is case sensitive template, contructor must start with a capital letter. 
+--left arrow is a binding operator when the left side is an action
+--propose accept pattern
+--non consuming choice is only relative to the contract the choice is in
+import Asset
+import DA.Action (foldlA, when)
+import DA.List (last, unique)
+import DA.Foldable (forA_)
+
+validateTxInputsAndCalcBalance: [ContractId Asset]->ContractId AssetHoldingAccount-> Decimal -> Update Decimal
+validateTxInputsAndCalcBalance assetCids accountCid outputAmount = do
+    assertMsg "Duplicate asset contractIds not allowed." $ unique assetCids
+    account<-fetch accountCid
+    assetAmounts <- sum <$> forA assetCids (\cid -> do  --returns an update that contain list . <$> functor for fmap
+        asset<-fetch cid
+        assertMsg "Owner Mismatch" $ asset.owner==account.owner
+        assertMsg "Type Mismatch" $ asset.assetType==account.assetType
+        return asset.amount)
+    assertMsg "insufficent Funds " $ assetAmounts >= outputAmount
+    return  assetAmounts --return function wraps decimal in an update
+
+
+
+template AssetHoldingAccount
+    with
+        owner:Party
+        assetType: AssetType
+        airDroppable:Bool
+        reshareable:Bool
+    where
+        signatory owner,assetType.issuer    --these signitories become implicit in any choice in the template.
+        key (assetType,owner) :(AssetType,Party) --key has to have atleast one party
+        maintainer key._1.issuer --1-1 relationship b/w asset and account
+    
+        nonconsuming choice InviteNewAssetHolder: ContractId AssetHoldingAccountProposal 
+            with
+                recipient:Party
+            controller if reshareable then owner else assetType.issuer
+            do
+                create AssetHoldingAccountProposal with
+                    account = this --this account contract payload(payload is always a damlrecord)
+                    recipient = recipient
+
+        nonconsuming choice Airdrop: ContractId Asset --workflow follows delegation pattern
+            with
+                amount:Decimal
+            controller assetType.issuer --issuer can airdrop the asset to the recipient
+            do
+                assertMsg "The asset is not airdroppable" airDroppable --prints message when the condition fails
+                -- assetCid<-lookupByKey @Asset $ key this --removed to avoid the issue of information leakage 
+                --(devulgence-non stakeholder sees the contract)
+                -- case assetCid of
+                --     Some cid -> do
+                --                     asset<- fetch cid
+                --                     archive cid 
+                --                     create asset with 
+                --                         amount=asset.amount+ amount
+                --     None->
+                create Asset with 
+                            assetType
+                            amount
+                            owner
+                            observers=[]
+                            -- can also use .. but not recommended
+
+        nonconsuming choice CreateTransfer: ContractId Transfer
+            with
+                assetCid: ContractId Asset
+                txAmount :Decimal
+                receipent: Party
+            controller  owner
+            do
+                
+                assetPayload<- fetch assetCid
+                assertMsg "Owner does not match" $ assetPayload.owner == owner
+                assertMsg "Asset Type does not match" $ assetPayload.assetType == assetType
+                assertMsg "Insufficient funds." $ txAmount<=assetPayload.amount
+
+
+                
+                archive assetCid
+                when ( txAmount < assetPayload.amount ) do
+                    create assetPayload with
+                        amount=assetPayload.amount - txAmount  
+                    return()
+                
+                create Transfer with
+                    receipent 
+                    asset=Asset with
+                        owner
+                        amount=txAmount
+                        assetType
+                        observers=[]             
+                
+        nonconsuming choice MergeSplit :[ContractId Asset] 
+            with
+                assetCids : [ContractId Asset]
+                outputAmounts:[Decimal]
+            controller owner
+            do
+                assertMsg "Asset is non fungible" assetType.fungable
+                totalAmount<-validateTxInputsAndCalcBalance assetCids self $ sum outputAmounts --validity of the assets for the given denomination
+               --archive all input contracts and a list of output contacts in the given denomination
+                forA_ assetCids archive 
+                let
+                    createOutputAssets assetsList amt = do  --defines a function that creates an output asset of the given denomination
+                        assertMsg "The amount of the output asset must be positive" $ amt>0.0
+                        a <- create Asset with
+                            assetType
+                            owner
+                            amount=amt
+                            observers=[]
+                        return $ a :: assetsList --adding to the list 
+                outputAssetCids <- foldlA createOutputAssets [] outputAmounts
+                if totalAmount > sum outputAmounts then do
+                    a <- create Asset with
+                        assetType
+                        owner
+                        amount=totalAmount - sum outputAmounts 
+                        observers=[]
+                    return $a ::outputAssetCids
+                else  return outputAssetCids
+        
+        nonconsuming choice CreateTrade:ContractId TradeProposal
+            with
+                assetCid:ContractId Asset
+                requestedAsset: Asset
+            controller owner
+            do
+                offeredAsset<-fetch assetCid
+                archive assetCid
+                offeredAssetCid<- create AssetInSwap with
+                            receiver=requestedAsset.owner
+                            asset=offeredAsset 
+                
+                create TradeProposal with 
+                    originator= owner
+                    receiver=requestedAsset.owner
+                    offeredAssetCid
+                    requestedAsset
+
+        nonconsuming choice PreApproveTransferIn:ContractId TransferPreApproval 
+            with
+                asset:Asset
+            controller owner
+            do
+                create TransferPreApproval with
+                    asset
+                    newOwner=owner
+
+        nonconsuming choice BurnAsset:()
+            with
+                assetCid:ContractId Asset
+            controller owner
+            do
+                archive assetCid
+
+        nonconsuming choice BurnAssetInSwap:()
+            with
+                assetCid:ContractId AssetInSwap
+            controller owner
+            do
+                archive assetCid
+        
+        nonconsuming choice DepositTransfer:()
+            with
+                asset:Asset
+                counterParty:Party
+            controller owner,counterParty
+            do
+                assertMsg "Owner cannot be the conterparty" (owner/=counterParty)
+                create asset with
+                    owner
+                return()
+
+          
+
+template TradeProposal
+    with
+        offeredAssetCid:ContractId AssetInSwap
+        receiver: Party
+        requestedAsset: Asset
+        originator: Party
+    where
+        signatory originator
+        observer receiver
+
+        choice TradeProposal_Accept:()
+            with
+                requestedAssetCid: ContractId Asset
+            controller receiver
+            do
+
+                offeredAsset<- fetch offeredAssetCid
+                exerciseByKey @AssetHoldingAccount (offeredAsset.asset.assetType,originator)
+                    BurnAssetInSwap with
+                        assetCid=offeredAssetCid
+                
+                exerciseByKey @AssetHoldingAccount (offeredAsset.asset.assetType,receiver)
+                    DepositTransfer with
+                        asset=offeredAsset.asset
+                        counterParty=originator
+                
+                providedAsset <- fetch requestedAssetCid
+                assertMsg "Provided asset should match the requested asset " (requestedAsset==providedAsset with observers=[])
+                
+                exerciseByKey @AssetHoldingAccount (requestedAsset.assetType,receiver) 
+                     BurnAsset with
+                        assetCid=requestedAssetCid
+                
+                exerciseByKey @AssetHoldingAccount (requestedAsset.assetType,originator)
+                    DepositTransfer with
+                        asset=requestedAsset
+                        counterParty=receiver
+
+                return()           
+
+
+template TransferPreApproval 
+    with
+        asset:Asset
+        newOwner:Party
+    where
+        signatory asset.assetType.issuer
+        observer newOwner,asset.owner
+
+        choice TransferPreApproval_TransferAsset: ContractId Asset
+            with
+                txAssetCid: ContractId Asset
+            controller newOwner,asset.owner
+            do
+                txAsset <- fetch txAssetCid
+                assertMsg "Transfer pre approval and transfer asset do not match!" $ 
+                    asset==txAsset with observers=[] --does not take into account whether the observers are different for the assets
+                archive txAssetCid
+                create asset with 
+                    owner=newOwner
+                    observers=[]
+
+        choice TransferPreApproval_TransferAssetInSwap: ContractId Asset
+            with
+                assetInSwapCid: ContractId AssetInSwap
+            controller newOwner,asset.owner
+            do
+                assetInSwap <- fetch assetInSwapCid
+                assertMsg "Transfer pre approval and transfer asset do not match!" $ 
+                    asset==assetInSwap.asset with observers=[] --does not take into account whether the observers are different for the assets
+                archive assetInSwapCid
+                create assetInSwap.asset with 
+                    owner=newOwner
+                    observers=[]          
+        
+template AssetInSwap --using escrow model
+    with
+        receiver:Party
+        asset:Asset 
+    where
+        signatory (signatory asset)
+        observer receiver
+        ensure if asset.assetType.fungable then asset.amount>0.0 else asset.amount==1.0 --why do we check this here again?
+
+        choice AssetInSwap_Cancel:ContractId Asset
+            controller asset.owner
+            do
+                create asset 
+              
+        choice AssetInSwap_Reject:ContractId Asset--if reject send back the balance in new asset to owner
+            controller receiver
+            do
+                create asset 
+        
+
+template Trade -- this is the proposal contract initiates atomic swap process
+    with
+        proposer:Party
+        receiver:Party
+        offeredAssetCid:ContractId AssetInSwap
+        requestedAssetTxPreApprovalCid: ContractId TransferPreApproval --GBP preapproval choice bob to alice
+    where
+        signatory proposer  --prevents either of the parties from making a choice independently
+        observer receiver
+
+        --choice Trade_Accept:ContractId Asset
+        choice Trade_Reject:ContractId Asset--if reject send back the balance in new asset to owner
+            controller receiver
+            do
+                exercise offeredAssetCid AssetInSwap_Reject
+
+        choice Trade_Cancel:ContractId Asset
+            controller proposer
+            do
+                exercise offeredAssetCid AssetInSwap_Cancel
+        
+        choice Trade_Settle:ContractId Asset
+            with
+                requestedAssetCids :[ContractId Asset]
+            controller receiver
+            do
+                offeredAsset<-fetch offeredAssetCid 
+                offeredAssetTxPreApprovalCid<- exerciseByKey @AssetHoldingAccount (offeredAsset.asset.assetType,receiver) PreApproveTransferIn with
+                    asset=offeredAsset.asset -- pre-approval of alice usd to bob account( Reason : Need issuer(fed) authority)
+                requestedAssetPreApproval<-fetch requestedAssetTxPreApprovalCid
+
+                assertMsg "Non fungible assets must be traded one at a time" $ (requestedAssetPreApproval.asset.assetType.fungable || length requestedAssetCids==1)
+
+                preparedRequestedAssetCids<-exerciseByKey @ AssetHoldingAccount 
+                    (requestedAssetPreApproval.asset.assetType,receiver) MergeSplit with
+                        assetCids=requestedAssetCids
+                        outputAmounts=[requestedAssetPreApproval.asset.amount]
+
+                exercise offeredAssetTxPreApprovalCid TransferPreApproval_TransferAssetInSwap with
+                    assetInSwapCid=offeredAssetCid
+                
+                exercise requestedAssetTxPreApprovalCid TransferPreApproval_TransferAsset with
+                    txAssetCid=last preparedRequestedAssetCids
+
+                --return()       
+
+                
+
+                
+--this delegation is once all delegation and you an excercise it only once. 
+
+template AssetHoldingAccountProposal
+    with
+        account: AssetHoldingAccount
+        recipient: Party
+    where
+        signatory account.assetType.issuer
+        observer recipient
+
+        choice AssetHoldingAccountProposal_Accept: ContractId AssetHoldingAccount
+            controller recipient
+
+            do
+                create account with 
+                    owner=recipient
+
+        choice AssetHoldingAccountProposal_Reject: ()
+            controller recipient
+            do
+                return() --archives the proposal contract
+        
+        choice AssetHoldingAccountProposal_cancel: ()
+            controller account.assetType.issuer
+            do
+                pure() -- same as return
+           
+

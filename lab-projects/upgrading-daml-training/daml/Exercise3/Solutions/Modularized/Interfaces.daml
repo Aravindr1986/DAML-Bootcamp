@@ -1,0 +1,88 @@
+-- This should be its own package!
+
+module Exercise3.Solutions.Modularized.Interfaces where
+
+import DA.Assert
+
+data VAsset = VAsset with
+  issuer : Party
+  owner : Party
+  assetType : Text
+  quantity : Decimal
+  obs : [Party]
+    deriving (Eq, Show)
+
+data VAssetTransferProposal = VAssetTransferProposal with
+  vasset : VAsset
+  newOwner : Party
+    deriving (Eq, Show)
+
+interface IAssetTransferProposal where
+  viewtype VAssetTransferProposal
+  asset : IAsset
+  
+  choice Accept_TransferProposal : ContractId IAsset
+    controller (view this).newOwner
+    do
+      create $ set_owner (asset this) (view this).newOwner
+
+  choice Reject_TransferProposal : ContractId IAsset
+    controller (view this).newOwner
+    do
+      create $ asset this
+
+interface IAsset where
+  viewtype VAsset
+  set_owner : Party -> IAsset
+  set_obs : [Party] -> IAsset
+  set_quantity : Decimal -> IAsset
+  transfer_for : Party -> IAssetTransferProposal
+
+  choice Transfer : ContractId IAsset
+      with
+        newOwner : Party
+      controller [(view this).owner, newOwner]
+      do
+        create $ set_owner (set_obs this []) newOwner
+
+  choice Split : (ContractId  IAsset, [ContractId IAsset])
+    with
+      splitQuantities : [Decimal]
+    controller (view this).owner
+    do
+      remCid <- create $ set_quantity this ((view this).quantity -  sum splitQuantities)
+      splitCids <- forA splitQuantities (\splitQuantity -> create$ set_quantity this splitQuantity)
+      return (remCid, splitCids)
+
+  choice Merge : ContractId IAsset
+    with
+      otherCids : [ContractId IAsset]
+    controller (view this).owner
+    do
+      quantities <- forA otherCids (\otherCid -> do
+        other <- fetch otherCid
+        let vo = view other
+        vo === (view this) with 
+          quantity = vo.quantity
+          obs = vo.obs
+        exercise otherCid Archive_Asset
+        return vo.quantity)
+      create $ set_quantity this ((view this).quantity + sum quantities)
+
+  choice Propose_Transfer : ContractId IAssetTransferProposal
+    with
+      newOwner : Party
+    controller (view this).owner
+    do
+      create (transfer_for this newOwner)
+
+  choice Set_Observers : ContractId IAsset
+    with
+      newObs : [Party]
+    controller (view this).owner
+    do
+      create $ set_obs this newObs
+
+  choice Archive_Asset : ()
+    controller (signatory this)
+    do return ()

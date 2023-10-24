@@ -1,0 +1,296 @@
+{-# LANGUAGE ApplicativeDo #-}
+
+module Test where
+
+import Asset
+import Daml.Script
+import Account
+data TestParties=TestParties with
+    alice :Party
+    bob :Party
+    charlie:Party
+
+data TestAccounts=TestAccounts with
+    tknALC:AssetType
+    aliceAlcAccountCid: ContractId AssetHoldingAccount
+    bobAlcAccountCid: ContractId AssetHoldingAccount
+    charlieAlcAccountCid: ContractId AssetHoldingAccount
+
+setupParties=script do
+    alice <- allocateParty "Alice"
+    bob <-allocateParty "Bob"
+    charlie <-allocateParty "Charlie"
+    let 
+        tp=TestParties with
+            alice
+            bob
+            charlie
+    return tp
+
+setupAccounts=script do
+    tp@TestParties{..}<-setupParties
+    let 
+        tknALC = AssetType with
+            issuer=alice
+            symbol="ALC"
+            fungable=True
+    aliceAlcAccountCid<-submit alice do
+        createCmd AssetHoldingAccount with
+            owner=alice
+            assetType=tknALC
+            airDroppable=True
+            reshareable=True
+    
+    aliceProposalToBobCid <- submit alice do
+         exerciseCmd  aliceAlcAccountCid InviteNewAssetHolder with
+             recipient =bob
+    bobAlcAccountCid<-submit bob do
+        exerciseCmd aliceProposalToBobCid AssetHoldingAccountProposal_Accept
+
+    aliceProposalToCharlieCid <- submit alice do
+         exerciseCmd  aliceAlcAccountCid InviteNewAssetHolder with
+             recipient =charlie
+    charlieAlcAccountCid<-submit charlie do
+        exerciseCmd aliceProposalToCharlieCid AssetHoldingAccountProposal_Accept
+    
+    let 
+        ta=TestAccounts with
+            ..
+    return(tp,ta)
+
+-- setupnonFungibleParties=script do
+--     alice <- allocateParty "Alice"
+--     bob <-allocateParty "Bob"
+--     let 
+--         tknALC = AssetType with
+--             issuer=alice
+--             symbol="ALC"
+--             fungable=False
+--     aliceAlcAccountCid<-submit alice do
+--         createCmd AssetHoldingAccount with
+--             owner=alice
+--             assetType=tknALC
+--             airDroppable=True
+--             reshareable=True
+--     let
+--         tp = TestParties with 
+--              .. --notation means bind the datatype variables to the
+--              -- local variabls having the same name.  
+--              --it is also code injection not reccomended. 
+--         --omiting the equals notation
+--             -- alice 
+--             -- bob
+--             -- tknALC
+        
+--     return tp
+
+testAssetIssuance = script do
+    alice <- allocateParty "Alice"
+    bob <-allocateParty "Bob"
+    let 
+        tknALC=AssetType with
+            issuer=alice
+            symbol="ALC"
+            fungable=True
+    submit alice do 
+        createCmd Asset with
+            assetType=tknALC
+            amount=10.0
+            owner=alice
+            observers=[]
+
+    submitMustFail bob do 
+        createCmd Asset with
+            assetType=tknALC
+            amount=10.0
+            owner=bob
+            observers=[]
+
+    submitMustFail alice do --still fails why?  uniqueness of key violation
+        createCmd Asset with
+            assetType=tknALC
+            amount = -10.0
+            owner=alice
+            observers=[]
+
+testNegativeAmount = script do
+    (tp@TestParties{..},ta@TestAccounts{..})<-setupAccounts
+    submitMustFail alice do 
+        createCmd Asset with
+            assetType=tknALC
+            amount = -10.0
+            owner=alice
+            observers=[]
+-- testFungebaleNonAmoutn=script do
+--     tp@TestParties{..}<-setupnonFungibleParties
+--     submitMustFail alice do 
+--         createCmd Asset with
+--             assetType=tknALC
+--             amount = 10.0
+--             owner=alice
+--for the non escrow method the recipient has to be oberver on the accound holding contract
+testFungebaleAmount=script do
+    (tp@TestParties{..},ta@TestAccounts{..})<-setupAccounts
+    submit alice do 
+        createCmd Asset with
+            assetType=tknALC
+            amount = 1.0
+            owner=alice
+            observers=[]
+testAirDrop =script do
+    (tp@TestParties{..},ta@TestAccounts{..})<-setupAccounts
+    submit alice do
+        exerciseCmd bobAlcAccountCid Airdrop with amount=10.0
+    submit alice do
+        exerciseCmd bobAlcAccountCid Airdrop with amount=10.0
+
+testTransfer=script do
+    (tp@TestParties{..},ta@TestAccounts{..})<-setupAccounts
+    
+    assetCid1<-submit alice do
+        exerciseCmd bobAlcAccountCid Airdrop with amount=10.0
+    
+    assetCid<-submit alice do
+        exerciseCmd bobAlcAccountCid Airdrop with amount=10.0
+    
+    submit alice do
+        exerciseCmd charlieAlcAccountCid Airdrop with amount=10.0
+
+    transferCid<-submit bob do
+        exerciseCmd bobAlcAccountCid CreateTransfer with
+            assetCid
+            txAmount=5.0
+            receipent=charlie
+    
+    submit  charlie do
+        exerciseCmd transferCid Transfer_Accept
+    
+
+    --Non escrow implementation test
+    charlieTxProposalCid <- submit bob do
+        exerciseCmd assetCid1 CreateTransferProposal        
+            with
+             receipent=charlie
+
+    submit charlie do 
+        exerciseCmd charlieAlcAccountCid DepositTransfer with
+            txpCid=charlieTxProposalCid
+    --calculating balance
+    Some charliePayload<- queryContractId charlie charlieAlcAccountCid
+    
+    calculatedBalance<-accountBalance charliePayload
+    debug $ calculatedBalance
+    charlieAssets <- queryFilter  @Asset charlie 
+        (\asset ->asset.owner==charlie )
+    
+    submit charlie do 
+        exerciseCmd charlieAlcAccountCid MergeSplit with
+            assetCids=(unzip charlieAssets)._1
+            outputAmounts=[20.0,1.0,1.0,1.0,1.0,1.0]
+    
+    debug $ calculatedBalance
+
+accountBalance: AssetHoldingAccount->Script Decimal
+accountBalance account= do
+    assets <- queryFilter  @Asset account.owner 
+        (\asset ->asset.owner==account.owner && asset.assetType==account.assetType)
+    let
+        (assetCids,assetPayload)=unzip assets
+    --return $ foldl(\acc payload->acc+payload.amount) 0.0 assetPayload    
+    -- uzips assets and gets the second parameter and inputs in to the sum. 
+    --here (.) parameter is funcion composition  parameter   
+    return $ sum . map (\x ->x.amount) $ (unzip assets)._2    
+
+
+--test script for atomic swap
+testTrade: Script()
+testTrade=do
+
+    alice<-allocateParty "Alice"
+    bob<-allocateParty "Bob"
+    fed<-allocateParty "Fed"
+    boe<-allocateParty "BOE"
+    let
+        tknUSD = AssetType with
+                issuer=fed
+                fungable=True
+                symbol="USD"
+
+        tknGBP= AssetType with
+                issuer=boe
+                fungable=True
+                symbol="GBP"
+
+    fedAccount <- submit fed do
+                createCmd AssetHoldingAccount with
+                    assetType=tknUSD
+                    owner=fed 
+                    airDroppable=True
+                    reshareable=True
+    boeAccount <- submit boe do
+                createCmd AssetHoldingAccount with
+                    assetType=tknGBP
+                    owner=boe 
+                    airDroppable=True
+                    reshareable=True
+
+
+    aliceUSDInviteCid<-submit fed do   
+        exerciseCmd fedAccount  InviteNewAssetHolder with recipient=alice
+    aliceGBPInviteCid<-submit boe do   
+        exerciseCmd boeAccount  InviteNewAssetHolder with recipient=alice
+
+    bobUSDInviteCid<-submit fed do
+        exerciseCmd fedAccount  InviteNewAssetHolder with recipient=bob
+    bobGBPInviteCid<-submit boe do   
+        exerciseCmd boeAccount  InviteNewAssetHolder with recipient=bob
+    
+    --Setting up accounts ofr Alice and Bob
+    aliceUSDAccountCid<-submit alice do 
+        exerciseCmd aliceUSDInviteCid AssetHoldingAccountProposal_Accept
+    aliceGBPAccountCid<-submit alice do 
+        exerciseCmd aliceGBPInviteCid AssetHoldingAccountProposal_Accept
+    bobUSDAccountCid<-submit bob do 
+        exerciseCmd bobUSDInviteCid AssetHoldingAccountProposal_Accept
+    bobGBPAccountCid<-submit bob do 
+        exerciseCmd bobGBPInviteCid AssetHoldingAccountProposal_Accept
+
+    --AirDrops for USD and GBP for Alice and Bob
+
+    submit fed do
+        exerciseCmd aliceUSDAccountCid Airdrop with amount=200.0
+    
+    submit fed do
+        exerciseCmd bobUSDAccountCid Airdrop with amount=100.0
+
+    submit boe do
+        exerciseCmd aliceGBPAccountCid Airdrop with amount=10.0
+    
+    submit boe do
+        exerciseCmd aliceGBPAccountCid Airdrop with amount=10.0
+
+    bobGBPCid<-submit boe do
+         exerciseCmd bobGBPAccountCid Airdrop with amount=100.0
+
+    (aliceUSDCids,_)<-unzip<$>queryFilter @Asset alice(\asset ->asset.owner ==alice && asset.assetType==tknUSD)
+
+    aliceUsdTradeCid<-submit alice do
+        exerciseCmd aliceUSDAccountCid CreateTrade with
+            assetCids=aliceUSDCids
+            offeredAssetAmount=120.0
+            requestedAsset=Asset with  
+                    assetType=tknGBP
+                    amount=60.0
+                    owner=bob
+                    observers=[]
+    
+    submit bob do
+         exerciseCmd aliceUsdTradeCid Trade_Settle with
+             requestedAssetCids=[bobGBPCid]
+
+
+    
+
+
+
+    return()

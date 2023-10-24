@@ -1,0 +1,27 @@
+module Exercise1.KYC where
+
+import Initial.Scripts
+
+import Daml.Script
+
+template KYC
+  with
+    bank : Party
+    counterparty : Party
+    address : Text
+  where
+    signatory bank
+    observer counterparty
+
+test_set_obs : Script ()
+test_set_obs = script do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+
+  -- Bank captures KYC data
+  rules <- submitUser uBank do
+    createCmd KYC with
+      bank = pBank
+      counterparty = pAlice
+      address = "Earth"
+
+  return ()

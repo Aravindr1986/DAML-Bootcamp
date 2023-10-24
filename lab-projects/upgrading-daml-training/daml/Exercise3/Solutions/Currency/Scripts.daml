@@ -1,0 +1,109 @@
+-- This should be its own package!
+
+module Exercise3.Solutions.Currency.Scripts where
+
+import Exercise3.Solutions.Currency.Cash qualified as V2.Cash
+import Exercise3.Solutions.Modularized.Cash qualified as V1.Cash
+import Exercise3.Solutions.Modularized.Interfaces
+import Exercise3.Solutions.Modularized.Scripts
+import Exercise3.Solutions.Modularized.Swap
+
+import Daml.Script
+
+import DA.Action
+import DA.Foldable (forA_)
+
+-- Scripts
+
+init_cash_v2 : TestParties -> TestUsers -> Script ()
+init_cash_v2 TestParties{..} TestUsers{..} = do
+  -- Bank issues some new assets in both USD and CHF
+
+  forA_ ["USD", "CHF"] (\currency -> do
+    -- Issue some cash in the form of transfer proposals.
+    let cash = V2.Cash.Cash with
+          issuer = pBank
+          owner = pBank
+          obs = []
+          quantity = 1.0
+          currency
+
+    -- 2 positions for Alice
+    replicateA_ 1 $ submitUser uBank do
+      replicateA_ 2 $ createCmd V2.Cash.CashTransferProposal with
+          cash
+          newOwner = pAlice 
+
+    -- 2 positionsfor Bob
+    replicateA_ 1 $ submitUser uBank do
+      replicateA_ 2 $ createCmd V2.Cash.CashTransferProposal with
+          cash
+          newOwner = pBob
+
+    -- Accept all transfer proposals
+    let
+      accept_all p = do
+        proposals <- queryFilter @V2.Cash.CashTransferProposal p (\tp -> tp.newOwner == p)
+        submit p do
+          forA_ proposals (\(cid, _) -> exerciseCmd (toInterfaceContractId @IAssetTransferProposal cid) Accept_TransferProposal)
+    forA_ [pAlice, pBob] accept_all
+
+    -- Alice transfers 1 of her positions to Bob
+    alicePositions <- queryFilter @V2.Cash.Cash pAlice (\pos -> pos.currency == currency)
+    forA_ (take 1 alicePositions) (\(cid, _) -> do
+      submitUser uAlice do
+        exerciseCmd (toInterfaceContractId @IAsset cid) Propose_Transfer with 
+          newOwner = pBob
+      )
+    )
+
+
+test_upgrade : Script (TestParties, TestUsers)
+test_upgrade = script do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- test_swap
+
+  init_cash_v2 tps tus
+
+  -- OLD SWAP, NEW ASSETS
+  -- Alice proposes an old swap, Cash for Cash, but allocates using a new asset.
+  (cid, posa)::_ <- queryFilter @V2.Cash.Cash pAlice (\pos -> pos.owner == pAlice && pos.currency == "CHF")
+  cid <- submitUser uAlice do
+    exerciseCmd (toInterfaceContractId @IAsset cid) Set_Observers with newObs = [pBob]
+  
+  let offerSpec = (pBank, "V2_Cash CHF", posa.quantity)
+      requestedSpec = (pBank, "Cash", posa.quantity)
+  swapCid <- submitUser uAlice do
+    createCmd AssetSwapProposal with
+      requester = pAlice
+      receiver = pBob
+      offerSpec
+      requestedSpec
+      offerCid = toInterfaceContractId @IAsset cid
+
+  -- Bob accepts using a new asset.
+  (cid, _)::_ <- queryFilter @V2.Cash.Cash pBob (\posb -> posb.owner == pBob && posb.quantity == posa.quantity && posb.currency == "USD")
+  submitUser uBob do
+    exerciseCmd swapCid Settle with requestedCid = toInterfaceContractId @IAsset cid
+
+  -- OLD SWAP, MIX OF ASSETS
+  -- Alice proposes an old swap, Cash for Cash, and allocates using an old asset.
+  (cid, posa)::_ <- queryFilter @V1.Cash.Cash pAlice (\pos -> pos.owner == pAlice)
+  cid <- submitUser uAlice do
+    exerciseCmd (toInterfaceContractId @IAsset cid) Set_Observers with newObs = [pBob]
+  
+  let assetSpec = (pBank, "Cash", posa.quantity)
+  swapCid <- submitUser uAlice do
+    createCmd AssetSwapProposal with
+      requester = pAlice
+      receiver = pBob
+      offerSpec = assetSpec
+      requestedSpec = assetSpec
+      offerCid = toInterfaceContractId @IAsset cid
+  
+  -- Bob accepts using a new asset.
+  (cid, _)::_ <- queryFilter @V2.Cash.Cash pBob (\posb -> posb.owner == pBob && posb.quantity == posa.quantity && posb.currency == "USD")
+  submitUser uBob do
+    exerciseCmd swapCid Settle with requestedCid = toInterfaceContractId @IAsset cid
+
+
+  return (tps, tus)

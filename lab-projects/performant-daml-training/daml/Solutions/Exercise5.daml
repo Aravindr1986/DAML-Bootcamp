@@ -1,0 +1,354 @@
+module Solutions.Exercise5 where
+
+import DA.Action
+import DA.Assert
+import DA.Foldable (forA_)
+import DA.Map
+
+import Daml.Script
+
+import Exercise3.Cash
+import Exercise3.XChange
+import Exercise3.Test
+
+-- Group 1: Use multiple positions.
+
+template Parallelized_App
+  with
+    operator : Party
+    obs : [Party]
+  where
+    signatory operator
+    observer obs
+
+    key operator : Party
+    maintainer key
+
+    nonconsuming choice Parallelized_Swap : ()
+      with
+        customer : Party
+        fromQuantity : Decimal
+        customerFromCid : ContractId Position
+        operatorToCid : ContractId Position
+      controller customer
+      do
+        -- Fetch contracts and validate they form a valid swap
+        customerFrom <- fetch customerFromCid
+        operatorTo <- fetch operatorToCid
+
+        customerFrom.owner === customer
+        operatorTo.owner === operator
+
+        -- Get the price
+        let 
+          pair = CurrencyPair with
+            issuerFrom = customerFrom.issuer
+            currencyFrom = customerFrom.currency
+            issuerTo = operatorTo.issuer
+            currencyTo = operatorTo.currency
+        (_, price) <- fetchByKey @Price (operator, pair)
+
+        -- Split out the right amount from the customer
+        -- Transfer it
+        (_, [fromCid]) <- exercise customerFromCid Split with
+          splitQuantities = [fromQuantity]    
+        fromCid <- exercise fromCid Transfer with newOwner = operator
+
+        -- Split out the right amount from the operator
+        -- Transfer it
+        (_, [toCid]) <- exercise operatorToCid Split with
+          splitQuantities = [fromQuantity * price.conversion]
+        toCid <- exercise toCid Transfer with newOwner = customer
+
+        return ()
+
+xchange_lots_parallelized : Script ()
+xchange_lots_parallelized = do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+  init_prices tus tps
+
+  -- Create a better version of the app
+  submitUser uAcme do
+    createCmd Parallelized_App with
+      operator = pAcme
+      obs = [pXChangeReader]
+
+  -- Make Acme's positions readable by XChangeReader
+  acmeCash <- queryFilter @Position pAcme (\tp -> tp.owner == pAcme)
+  submitUser uAcme do
+    forA_ acmeCash (\(cid, _) -> exerciseCmd cid Set_Observer with newObs = [pXChangeReader])
+
+  -- First split both Alice's and Acme's positions into nSwaps individual positions
+  let
+    splitInto n owner currency = do
+      [(cid, pos)] <- queryFilter @Position owner (\p -> p.owner == owner && p.currency == currency)
+      -- Take care here as pos.quantity/n may not be precise. Aim to keep a remainder of ~0.1
+      let splitAmount = (pos.quantity - 0.1) / (intToDecimal n)
+      (_, posCids) <- submit owner do
+        exerciseCmd cid Split with splitQuantities = replicate n splitAmount
+      return posCids
+
+  let nSwaps = 8
+
+  customerFromCids <- splitInto nSwaps pAlice "USD"
+  operatorToCids <- splitInto nSwaps pAcme "CHF"
+  
+  -- Swap repeatedly from USD to CHF. The input contracts for each of these commands
+  -- is disjoint so these could run in parallel.
+  forA_ (zip customerFromCids operatorToCids) (\(customerFromCid, operatorToCid) -> do
+    -- Perform a swap
+    submitUser uAlice do
+      exerciseByKeyCmd @Parallelized_App pAcme Parallelized_Swap with 
+        customer = pAlice
+        fromQuantity = 11.0
+        ..
+    )
+
+
+
+
+-- Group 2: Use a request-response pattern so Acme can manage contention.
+
+template Request_Response_App
+  with
+    operator : Party
+    obs : [Party]
+  where
+
+    signatory operator
+    observer obs
+
+    key operator : Party
+    maintainer key
+
+    nonconsuming choice Create_Trade : ()
+      with
+        customer : Party
+        fromQuantity : Decimal
+        customerFromCid : ContractId Position
+        issuerTo : Party
+        currencyTo: Text
+      controller customer
+      do
+        -- Fetch contracts and validate they form a valid swap
+        customerFrom <- fetch customerFromCid
+
+        customerFrom.owner === customer
+
+        -- Get the price
+        let 
+          pair = CurrencyPair with
+            issuerFrom = customerFrom.issuer
+            currencyFrom = customerFrom.currency
+            issuerTo
+            currencyTo
+
+        (_, price) <- fetchByKey @Price (operator, pair)
+
+        -- Split out the right amount from the customer
+        -- Make the operator an observer on the split out balance
+        (_, [fromCid]) <- exercise customerFromCid Split with
+          splitQuantities = [fromQuantity]    
+        fromCid <- exercise fromCid Set_Observer with newObs = [operator]
+
+        -- Create a Trade
+        create Trade with
+          quantityTo = fromQuantity * price.conversion
+          ..
+
+        return ()
+
+template Trade
+  with
+    operator : Party
+    customer : Party
+    fromCid : ContractId Position
+    issuerTo : Party
+    currencyTo: Text
+    quantityTo : Decimal
+  where
+    signatory [customer, operator]
+
+    nonconsuming choice Settle : ()
+      with
+        toCid : ContractId Position
+      controller operator
+      do
+        -- Fetch contracts and validate they form a valid swap
+        to <- fetch toCid
+        to.owner === operator
+        to.currency === currencyTo
+        to.issuer === issuerTo
+
+        -- Transfer the customer's funds
+        exercise fromCid Transfer with newOwner = operator
+
+        -- Split the right amount from operator's funds
+        toCid' <- if to.quantity == quantityTo
+          then return toCid
+          else do
+            (_, [toCid'']) <- exercise toCid Split 
+              with splitQuantities = [quantityTo]
+            return toCid''
+
+        -- Transfer operator's funds
+        exercise toCid' Transfer with newOwner = customer
+
+        return ()
+
+xchange_request_response : Script ()
+xchange_request_response = do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+  init_prices tus tps
+
+  -- Create a better version of the app
+  submitUser uAcme do
+    createCmd Request_Response_App with
+      operator = pAcme
+      obs = [pXChangeReader]
+
+  let
+    submitTrade user customer fromQuantity currencyFrom issuerFrom currencyTo issuerTo = do
+      [(customerFromCid, _)] <- queryFilter @Position customer (\p -> p.owner == customer && p.currency == currencyFrom  && p.issuer == issuerFrom)
+      submitUser user do
+        exerciseByKeyCmd @Request_Response_App pAcme Create_Trade with ..
+
+  -- These requests don't contend
+  submitTrade uAlice pAlice 11.0 "USD" pUsdBank "CHF" pChfBank
+  submitTrade uBob pBob 11.0 "USD" pUsdBank "CHF" pChfBank
+
+  -- Acme can can now manage the contention eg by splitting out the two amounts first
+  trades <- queryFilter @Trade pAcme (\trd -> trd.operator == pAcme && trd.currencyTo == "CHF")
+  let splitQuantities = map (\(_, trd) -> trd.quantityTo) trades
+  [(toCid, _)] <- queryFilter @Position pAcme (\p -> p.owner == pAcme && p.currency == "CHF" && p.quantity > 1000.0)
+  (_, toCids) <- submitUser uAcme do
+    exerciseCmd toCid Split with
+      splitQuantities
+
+  -- These settlements are now again parallelizable.
+  forA_ (zip trades toCids) (\((trdCid, _), toCid) ->
+    submitUser uAcme do exerciseCmd trdCid Settle with toCid)
+
+
+-- Group 3: Batching for Alice
+
+template Batched_App
+ with
+    operator : Party
+    obs : [Party]
+  where
+
+    signatory operator
+    observer obs
+
+    key operator : Party
+    maintainer key
+
+    nonconsuming choice Run_Batch : ()
+      with
+        customer : Party
+        -- Input positions
+        customerPositions : Map (Text, Party) (ContractId Position)
+        operatorPositions : Map (Text, Party) (ContractId Position)
+        -- Each swap is a currency pair and an amount to be swapped
+        swaps : [(CurrencyPair, Decimal)]
+      controller customer
+      do
+        foldlA (\(customerPositions, operatorPositions) (pair, fromQuantity) -> do
+          let
+            Some customerFromCid = DA.Map.lookup (pair.currencyFrom, pair.issuerFrom) customerPositions
+            Some customerToCid = DA.Map.lookup (pair.currencyTo, pair.issuerTo) customerPositions
+            Some operatorFromCid = DA.Map.lookup (pair.currencyFrom, pair.issuerFrom) operatorPositions
+            Some operatorToCid = DA.Map.lookup (pair.currencyTo, pair.issuerTo) operatorPositions
+
+          -- Fetch contracts and validate they form a valid swap
+          customerFrom <- fetch customerFromCid
+          customerTo <- fetch customerToCid
+          operatorFrom <- fetch operatorFromCid
+          operatorTo <- fetch operatorToCid
+
+          customerFrom.owner === customer
+          customerTo.owner === customer
+          operatorFrom.owner === operator
+          operatorTo.owner === operator
+
+          -- Get the price
+          let 
+            pair = CurrencyPair with
+                issuerFrom = operatorFrom.issuer
+                currencyFrom = operatorFrom.currency               
+                issuerTo = operatorTo.issuer
+                currencyTo = operatorTo.currency
+          (_, price) <- fetchByKey @Price (operator, pair)
+
+          -- Split out the right amount from the customer
+          -- Transfer it
+          -- Merge it into the providers position
+          (customerFromCid, [fromCid]) <- exercise customerFromCid Split with
+            splitQuantities = [fromQuantity]
+          fromCid <- exercise fromCid Transfer with newOwner = operator
+          operatorFromCid <- exercise operatorFromCid Merge with otherCids = [fromCid]
+
+          -- Split out the right amount from the operator
+          -- Transfer it
+          -- Merge it into the providers position
+          (operatorToCid, [toCid]) <- exercise operatorToCid Split with
+            splitQuantities = [fromQuantity * price.conversion]
+          toCid <- exercise toCid Transfer with newOwner = customer
+          customerToCid <- exercise customerToCid Merge with otherCids = [toCid]
+
+          let
+            customerPositions'
+              = DA.Map.insert (pair.currencyFrom, pair.issuerFrom) customerFromCid
+              $ DA.Map.insert (pair.currencyTo, pair.issuerTo) customerToCid
+              $ customerPositions
+            operatorPositions'
+              = DA.Map.insert (pair.currencyFrom, pair.issuerFrom) operatorFromCid
+              $ DA.Map.insert (pair.currencyTo, pair.issuerTo) operatorToCid
+              $ operatorPositions
+
+          return (customerPositions', operatorPositions')
+          )
+          (customerPositions, operatorPositions)
+          swaps
+
+        return ()
+
+xchange_batched : Script ()
+xchange_batched = do
+  (tps@TestParties{..}, tus@TestUsers{..}) <- init_cash
+  init_prices tus tps
+
+  -- Create a better version of the app
+  submitUser uAcme do
+    createCmd Batched_App with
+      operator = pAcme
+      obs = [pXChangeReader]
+  
+  -- Make Acme's positions readable by XChangeReader
+  acmeCash <- queryFilter @Position pAcme (\tp -> tp.owner == pAcme)
+  submitUser uAcme do
+    forA_ acmeCash (\(cid, _) -> exerciseCmd cid Set_Observer with newObs = [pXChangeReader])
+
+  -- Collect positions into a map
+  [(customerFromCid, _)] <- queryFilter @Position pAlice (\p -> p.owner == pAlice && p.currency == "USD")
+  [(customerToCid, _)] <- queryFilter @Position pAlice (\p -> p.owner == pAlice && p.currency == "CHF")
+  [(operatorFromCid, _)] <- queryFilter @Position pXChangeReader (\p -> p.owner == pAcme && p.currency == "USD")
+  [(operatorToCid, _)] <- queryFilter @Position pXChangeReader (\p -> p.owner == pAcme && p.currency == "CHF")
+  
+  let
+    customerPositions = DA.Map.fromList [(("USD", pUsdBank), customerFromCid), (("CHF", pChfBank), customerToCid)]
+    operatorPositions = DA.Map.fromList [(("USD", pUsdBank), operatorFromCid), (("CHF", pChfBank), operatorToCid)]
+    pair = CurrencyPair with
+      currencyFrom = "USD"
+      issuerFrom = pUsdBank
+      currencyTo = "CHF"
+      issuerTo = pChfBank
+    swaps = replicate 9 (pair, 11.0 : Decimal)
+
+  submitUser uAlice do
+    exerciseByKeyCmd @Batched_App pAcme Run_Batch with 
+      customer = pAlice
+      ..
+
+  return ()

@@ -1,0 +1,79 @@
+{-# LANGUAGE ApplicativeDo #-}
+
+module Test2 where
+
+import Asset2
+import Daml.Script
+import Account2
+
+--test script for atomic swap
+testTrade: Script()
+testTrade=do
+
+    
+    alice<-allocateParty "Alice"
+    bob<-allocateParty "Bob"
+    fed<-allocateParty "Fed"
+    boe<-allocateParty "BOE"
+    let
+        tknUSD = AssetType with
+                issuer=fed
+                fungable=True
+                symbol="USD"
+
+        tknGBP= AssetType with
+                issuer=boe
+                fungable=True
+                symbol="GBP"
+
+    fedAccount <- submit fed do
+                createCmd AssetHoldingAccount with
+                    assetType=tknUSD
+                    owner=fed 
+                    airDroppable=True
+                    reshareable=True
+    boeAccount <- submit boe do
+                createCmd AssetHoldingAccount with
+                    assetType=tknGBP
+                    owner=boe 
+                    airDroppable=True
+                    reshareable=True
+
+
+    aliceUSDInviteCid<-submit fed do   
+        exerciseCmd fedAccount  InviteNewAssetHolder with recipient=alice
+    aliceGBPInviteCid<-submit boe do   
+        exerciseCmd boeAccount  InviteNewAssetHolder with recipient=alice
+
+    bobUSDInviteCid<-submit fed do
+        exerciseCmd fedAccount  InviteNewAssetHolder with recipient=bob
+    bobGBPInviteCid<-submit boe do   
+        exerciseCmd boeAccount  InviteNewAssetHolder with recipient=bob
+    
+    --Setting up accounts ofr Alice and Bob
+    aliceUSDAccountCid<-submit alice do 
+        exerciseCmd aliceUSDInviteCid AssetHoldingAccountProposal_Accept
+    aliceGBPAccountCid<-submit alice do 
+        exerciseCmd aliceGBPInviteCid AssetHoldingAccountProposal_Accept
+    bobUSDAccountCid<-submit bob do 
+        exerciseCmd bobUSDInviteCid AssetHoldingAccountProposal_Accept
+    bobGBPAccountCid<-submit bob do 
+        exerciseCmd bobGBPInviteCid AssetHoldingAccountProposal_Accept
+    
+    aliceTradeCid<-submit alice do
+        exerciseCmd aliceUSDAccountCid create Trade 
+            with
+                proposer=alice
+                offeredAssetCid=aliceUSDCid
+                requestedAsset=Asset2 with
+                    assetType=tknGBP
+                    amount=60.0
+                    owner=bob
+                    observers=[]
+    submit bob do
+        exerciseCmd aliceTradeCid Trade_Settle
+            with
+                requestedAssetCid=bobGBPCid
+    
+
+    return()

@@ -1,0 +1,86 @@
+module Initial.Scripts where
+
+import Initial.Cash
+
+import Daml.Script
+import DA.Action
+import DA.Foldable (forA_)
+
+data TestParties = TestParties with
+  pBank : Party
+  pAlice : Party
+  pBob : Party
+
+data TestUsers = TestUsers with
+  uBank : UserId
+  uAlice : UserId
+  uBob : UserId
+
+init_parties : Script TestParties
+init_parties = do
+  let allocate t = allocatePartyWithHint t (PartyIdHint t)
+  pBank <- allocate "Bank"
+  pAlice <- allocate "Alice"
+  pBob <- allocate "Bob"
+
+  return (TestParties with ..)
+
+init_users : TestParties -> Script TestUsers
+init_users TestParties{..} = do
+  let 
+    makeUser t p rs = do
+      uid <- validateUserId t
+      let 
+        u = User with 
+          userId = uid
+          primaryParty = Some p
+      createUser u (CanActAs p :: rs)
+      return uid
+  uBank <- makeUser "bank" pBank []
+  uAlice <- makeUser "alice" pAlice []
+  uBob <- makeUser "bob" pBob []
+
+  return (TestUsers with ..)
+
+init_cash : Script (TestParties, TestUsers)
+init_cash = do
+  ps@TestParties{..} <- init_parties
+  us@TestUsers{..} <- init_users ps
+
+  -- Issue some cash in the form of transfer proposals.
+  let position = Position with
+        issuer = pBank
+        owner = pBank
+        obs = []
+        quantity = 1.0
+
+  -- 200 positions of $1 for Alice
+  replicateA_ 20 $ submitUser uBank do
+    replicateA_ 10 $ createCmd TransferProposal with
+        position
+        newOwner = pAlice 
+
+  -- 100 positions for Bob
+  replicateA_ 10 $ submitUser uBank do
+    replicateA_ 10 $ createCmd TransferProposal with
+        position
+        newOwner = pBob
+
+   -- Accept all transfer proposals
+  let
+    accept_all p = do
+      proposals <- queryFilter @TransferProposal p (\tp -> tp.newOwner == p)
+      submit p do
+        forA_ proposals (\(cid, _) -> exerciseCmd cid Accept)
+  forA_ [pAlice, pBob] accept_all
+
+
+  -- Alice transfers 50 of her positions to Bob
+  alicePositions <- query @Position pAlice
+  forA_ (take 50 alicePositions) (\(cid, _) -> do
+    submitUser uAlice do
+      exerciseCmd cid Propose_Transfer with 
+        newOwner = pBob
+    )
+
+  return (ps, us)

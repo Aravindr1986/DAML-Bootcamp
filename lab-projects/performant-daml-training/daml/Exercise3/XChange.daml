@@ -1,0 +1,102 @@
+module Exercise3.XChange where
+
+import DA.Assert
+
+import Exercise3.Cash
+
+data CurrencyPair = CurrencyPair with
+  issuerFrom : Party
+  currencyFrom : Text
+  issuerTo : Party
+  currencyTo : Text
+    deriving (Eq, Show)
+
+template Price
+  with
+    provider : Party
+    obs : [Party]
+    pair : CurrencyPair
+    conversion : Decimal
+  where
+    signatory provider
+    observer obs
+
+    key (provider, pair) : (Party, CurrencyPair)
+    maintainer key._1
+template Trade 
+  with
+
+      
+template App
+  with
+    operator : Party
+    obs : [Party]
+  where
+    signatory operator
+    observer obs
+
+    key operator : Party
+    maintainer key
+
+    nonconsuming choice Swap_V1 : ()
+      with
+        customer : Party
+        fromQuantity : Decimal
+        customerFromCid : ContractId Position
+        customerToCid : ContractId Position
+        operatorFromCid : ContractId Position
+        operatorToCid : ContractId Position
+      controller customer
+      do
+        -- Fetch contracts and validate they form a valid swap
+        customerFrom <- fetch customerFromCid
+        customerTo <- fetch customerToCid
+        operatorFrom <- fetch operatorFromCid
+        operatorTo <- fetch operatorToCid
+
+        customerFrom.owner === customer
+        customerTo.owner === customer
+        operatorFrom.owner === operator
+        operatorTo.owner === operator
+
+        -- Get the price
+        let 
+          pair = CurrencyPair with
+            issuerFrom = operatorFrom.issuer
+            currencyFrom = operatorFrom.currency
+            issuerTo = operatorTo.issuer
+            currencyTo = operatorTo.currency
+        (_, price) <- fetchByKey @Price (operator, pair)
+
+        -- Split out the right amount from the customer
+        -- Transfer it
+        -- Merge it into the providers position
+        (_, [fromCid]) <- exercise customerFromCid Split with
+          splitQuantities = [fromQuantity]
+        fromCid <- exercise fromCid Transfer with newOwner = operator
+        exercise operatorFromCid Merge with otherCids = [fromCid]
+
+        -- Split out the right amount from the operator
+        -- Transfer it
+        -- Merge it into the providers position
+        (_, [toCid]) <- exercise operatorToCid Split with
+          splitQuantities = [fromQuantity * price.conversion]
+        toCid <- exercise toCid Transfer with newOwner = customer
+        exercise customerToCid Merge with otherCids = [toCid]
+
+        return ()
+
+    choice Create_Trade:()
+      with
+        customer : Party
+        fromQuantity : Decimal
+        customerFromCid : ContractId Position
+        customerToCid : ContractId Position
+        operatorFromCid : ContractId Position
+        operatorToCid : ContractId Position
+      controller customer
+      do
+
+
+
+

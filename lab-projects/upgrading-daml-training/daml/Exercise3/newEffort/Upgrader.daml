@@ -1,0 +1,24 @@
+module Upgrader where
+import Cash
+import Interface
+
+template Currency
+    with
+    _issuer : Party
+    _owner : Party
+    _quantity : Decimal
+    _obs : [Party]
+  where
+    signatory [_issuer, _owner]
+    observer _obs
+    interface instance IAsset for Currency where
+      view = VAsset with
+        issuer = _issuer
+        owner = _owner
+        obs = _obs
+        quantity = _quantity
+        assetType = "USD"
+      set_obs newObs = toInterface (this with _obs = newObs)
+      set_owner newOwner = toInterface (this with _owner = newOwner)
+      set_quantity newQuantity = toInterface (this with _quantity = newQuantity)
+      transfer_for newOwner = toInterface $ CashTransferProposal with Currency = this; ..

@@ -1,0 +1,210 @@
+{-# LANGUAGE ApplicativeDo #-}
+
+module Solutions.Exercise1 where
+
+import DA.Action
+import Daml.Script
+
+-- CPU Blowup
+-------------
+
+recurse_n : Int -> ()
+recurse_n n =
+  if n == 0 then ()
+  else recurse_n (n-1)
+
+template CPU_Blowup_App
+  with
+    acme : Party
+    alice : Party
+  where
+    signatory acme
+    observer alice
+
+    nonconsuming choice CPU_Business_Transaction : ()
+      with
+      controller alice
+      do
+        return (recurse_n 200000000)
+
+
+-- Since the aim is to blow things up, test_app is guarded by taking a parameter.
+-- Run it using two terminals
+-- 1. `daml sandbox`
+-- 2. `daml deploy && daml script --dar .daml/dist/performant-daml-training-1.0.0.dar --ledger-host localhost --ledger-port 6865 --script-name "Solutions.Exercise1:test_cpu_blowup_app" --input-file unit.json`
+-- Kill your sandbox (ctrl+c) as needed.
+
+-- Uncomment the next line at your own risk to run the script in the IDE.
+-- run = test_cpu_blowup_app ()
+
+test_cpu_blowup_app : () -> Script ()
+test_cpu_blowup_app () = do
+  -- Parties assumed to be on distict participants
+  acme <- allocateParty "acme"
+  alice <- allocateParty "alice"
+
+  -- Acme initializes the app
+  fooCid <- submit acme do
+    createCmd CPU_Blowup_App with ..
+
+  -- Alice performs the business transaction.
+  submit alice do
+    exerciseCmd fooCid CPU_Business_Transaction
+
+
+-- Memory Blowup
+----------------
+
+template Memory_Blowup_App
+  with
+    acme : Party
+    alice : Party
+  where
+    signatory acme
+    observer alice
+
+    nonconsuming choice Memory_Business_Transaction : ()
+      with
+      controller alice
+      do
+        -- generate a list of 64-bit integers.
+        let x : [Int] = [0..100000000]
+        return ()
+
+
+-- Since the aim is to blow things up, test_app is guarded by taking a parameter.
+-- Run it using two terminals
+-- 1. `daml sandbox`
+-- 2. `daml deploy && daml script --dar .daml/dist/performant-daml-training-1.0.0.dar --ledger-host localhost --ledger-port 6865 --script-name "Solutions.Exercise1:test_memory_blowup_app" --input-file unit.json`
+-- Kill your sandbox (ctrl+c) as needed.
+
+-- Uncomment the next line at your own risk to run the script in the IDE.
+-- run = test_memory_blowup_app ()
+
+test_memory_blowup_app : () -> Script ()
+test_memory_blowup_app () = do
+  -- Parties assumed to be on distict participants
+  acme <- allocateParty "acme"
+  alice <- allocateParty "alice"
+
+  -- Acme initializes the app
+  fooCid <- submit acme do
+    createCmd Memory_Blowup_App with ..
+
+  -- Alice performs the business transaction.
+  submit alice do
+    exerciseCmd fooCid Memory_Business_Transaction
+
+-- Informee/View/Transaction Size Blowup
+----------------------------------------
+
+-- For each party in others, call View_Business_Transaction recursively with that party
+-- moved from others to viewers.
+next : ContractId View_Blowup_App -> [Party] -> [Party] -> [Party] -> Update ()
+next cid xs ys viewers = do
+  case xs of
+   [] -> return ()
+   x::xs' -> do
+      exercise cid View_Business_Transaction with 
+        viewers = x::viewers
+        others = xs' ++ ys
+      next cid xs' (x::ys) viewers
+
+template View_Blowup_App
+  with
+    acme : Party
+    alice : Party
+  where
+    signatory acme
+    observer alice
+
+    nonconsuming choice View_Business_Transaction : ()
+      with
+        viewers : [Party]
+        others : [Party]
+      observer viewers
+      controller alice
+      do
+        next self others [] viewers
+        return ()
+
+
+-- Since the aim is to blow things up, test_app is guarded by taking a parameter.
+-- Run it using two terminals
+-- 1. `daml sandbox`
+-- 2. `daml deploy && daml script --dar .daml/dist/performant-daml-training-1.0.0.dar --ledger-host localhost --ledger-port 6865 --script-name "Solutions.Exercise1:test_view_blowup_app" --input-file unit.json`
+-- Kill your sandbox (ctrl+c) as needed.
+
+-- Uncomment the next line at your own risk to run the script in the IDE.
+-- run = test_view_blowup_app ()
+
+test_view_blowup_app : () -> Script ()
+test_view_blowup_app () = do
+  -- Parties assumed to be on distict participants
+  acme <- allocateParty "acme"
+  alice <- allocateParty "alice"
+  others <- forA [1..7] (\n -> allocateParty ("p" <> show n)) 
+
+  -- Acme initializes the app
+  fooCid <- submit acme do
+    createCmd View_Blowup_App with ..
+
+  -- Alice performs the business transaction.
+  submit alice do
+    exerciseCmd fooCid View_Business_Transaction with
+      viewers = []
+      others
+
+
+-- Validator Size Blowup
+----------------------------------------
+
+template Validator_Blowup_App
+  with
+    acme : Party
+    alice : Party
+  where
+    signatory acme
+    observer alice
+
+    nonconsuming choice Validator_Business_Transaction : ()
+      with
+        others : [Party]
+      controller alice::others
+      do
+        return ()
+
+
+-- Since the aim is to blow things up, test_app is guarded by taking a parameter.
+-- Run it using two terminals
+-- 1. `daml sandbox`
+-- 2. `daml deploy && daml script --dar .daml/dist/performant-daml-training-1.0.0.dar --ledger-host localhost --ledger-port 6865 --script-name "Solutions.Exercise1:test_validator_blowup_app" --input-file unit.json`
+-- Kill your sandbox (ctrl+c) as needed.
+
+-- Uncomment the next line at your own risk to run the script in the IDE.
+-- run = test_validator_blowup_app ()
+
+test_validator_blowup_app : () -> Script ()
+test_validator_blowup_app () = do
+  -- Parties assumed to be on distict participants
+  acme <- allocateParty "acme"
+  alice <- allocateParty "alice"
+  others <- forA [1..1000] (\n -> allocateParty ("p" <> show n)) 
+
+  -- Acme initializes the app
+  fooCid <- submit acme do
+    createCmd Validator_Blowup_App with ..
+
+  -- Alice performs the business transaction jointly with increasing numbers of other controllers.
+  foldlA (\others _n -> do
+    let l = length others
+    new_parties <- forA [1..100] (\n -> allocateParty ("p" <> show (n + l)))
+    let new_others = others ++ new_parties
+    submitMulti (alice::new_others) [] do
+      exerciseCmd fooCid Validator_Business_Transaction with
+        others = new_others
+    return new_others
+    )
+    []
+    [1..1000]
+  return ()

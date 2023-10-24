@@ -1,0 +1,40 @@
+module Functions where 
+import Daml.Script
+--typeclase Eq,Show
+
+
+increment: Int -> Int
+increment n=n+1
+add: Int->Int->Int
+add x y =x+y
+
+doubleMe : Int->Int
+doubleMe x = x*2
+
+doubleUs :Int->Int->Int
+doubleUs x y = doubleMe x + doubleMe y
+
+testFunctions:Script()
+testFunctions = script do
+    debug $ increment 3 -- $ is called function application operator
+    --function application is left associative
+    debug ( increment 5) --also works due to left associativity but not idiomatic in daml
+    debug $ add 3 4
+
+    debug $ 3 `add` 4 --infix notation
+    debug $ (+) 3 4
+    debug $ (\x-> 3*x*x + 2*x + 1 ) 5 --where  the function is a lambda and 5 is the value of x
+    debug $ 3 `doubleUs` 6
+    pure() -- same as return 
+
+
+--currying
+
+addTwoNumbers :Int->Int->Int
+addTwoNumbers x y = x+y
+
+addSeven: Int->Int --currying
+addSeven =addTwoNumbers 7  --implicitly takes the 6 as one of the argument
+--addSeven x is the curried form of (addTwoNumbers 7)x
+test_addSeven=script do
+    debug $ addSeven 6 --currying
